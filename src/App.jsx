@@ -20,7 +20,6 @@ const firebaseConfig = {
   messagingSenderId: "665755863496",
   appId: "1:665755863496:web:7ad0698d2360fc577898fd"
 };
-const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'werewolf-web-app';
@@ -192,7 +191,6 @@ export default function WerewolfApp() {
 
   const performNightCalculation = async (currentRoom) => {
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', currentRoom.id);
-    // 確保即使出現異常，也不會因為讀不到屬性而崩潰
     const actions = currentRoom.nightActions || {};
     const { wolfTarget, guardTarget, witchHeal, witchPoison } = actions;
     
@@ -274,7 +272,11 @@ export default function WerewolfApp() {
     let voteLog = '投票結果平局，沒有人被放逐。';
     let isHunterExiled = false;
 
-    if (exiledId) {
+    // 處理棄票邏輯
+    if (exiledId === 'skip') {
+      voteLog = '多數玩家選擇棄票，沒有人被放逐。';
+      exiledId = null;
+    } else if (exiledId) {
       updatedPlayers = updatedPlayers.map(p => {
         if (p.id === exiledId) {
           if (p.role === '獵人') isHunterExiled = true;
@@ -415,7 +417,6 @@ export default function WerewolfApp() {
 
   const handlePlayerClick = async (targetId) => {
     const me = room.players.find(p => p.id === user.uid);
-    // 放寬條件：獵人開槍期間，即使自己死亡也能點擊
     const isHunterShooting = room.status === 'hunter_shoot' && me?.id === room.currentSpeaker;
     if (!me || (!me.isAlive && !isHunterShooting)) return;
 
@@ -437,6 +438,7 @@ export default function WerewolfApp() {
       }
     } 
     else if (room.status === 'day' && room.subPhase === 'discussing') {
+      // 在討論階段將目標存入 votes (包含 targetId === 'skip' 的情況)
       await updateDoc(roomRef, { [`votes.${user.uid}`]: targetId });
     }
     else if (isHunterShooting) {
@@ -449,7 +451,6 @@ export default function WerewolfApp() {
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id);
     let updates = {};
     
-    // 【修復】強制建立一個本機快取，防止非同步推進時遺失狀態
     let localNightActions = { ...(room.nightActions || {}) };
 
     if (actionType === 'pass') {
@@ -515,7 +516,6 @@ export default function WerewolfApp() {
       await updateDoc(roomRef, updates);
     }
     setSelectedTarget(null);
-    // 【修復】使用同步的 localNightActions 代替尚未完成更新的 room.nightActions，避免結算報錯
     proceedToNextPhase({ ...room, nightActions: localNightActions });
   };
 
@@ -543,7 +543,6 @@ export default function WerewolfApp() {
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), { chat: arrayUnion(msg) });
   };
 
-  // 【修復】防卡死功能大升級
   const hostForceNext = async () => {
     if (room.status === 'day' && room.subPhase === 'discussing') {
       await performVoteCalculation();
@@ -564,11 +563,15 @@ export default function WerewolfApp() {
   const RoleIcon = me ? ROLES_INFO[me.role]?.icon || Info : Info;
   
   const isHunterShooting = room?.status === 'hunter_shoot' && me?.id === room?.currentSpeaker;
+  const isVotingPhase = room?.status === 'day' && room?.subPhase === 'discussing' && me?.isAlive;
+
+  // 加入投票階段，讓操作面板可以在白天投票時顯示
   const myTurn = (room?.status === 'night' && room?.subPhase === 'guard' && me?.role === '守衛' && me?.isAlive) ||
                  (room?.status === 'night' && room?.subPhase === 'wolf' && me?.role === '狼人' && me?.isAlive) ||
                  (room?.status === 'night' && room?.subPhase === 'witch' && me?.role === '女巫' && me?.isAlive) ||
                  (room?.status === 'night' && room?.subPhase === 'seer' && me?.role === '預言家' && me?.isAlive) ||
                  (room?.status === 'day' && room?.subPhase === 'speaking' && room?.currentSpeaker === me?.id) ||
+                 isVotingPhase ||
                  isHunterShooting;
 
   // --- Views ---
@@ -692,7 +695,8 @@ export default function WerewolfApp() {
               {myTurn && (
                 <div className={`p-4 rounded-xl shadow-lg border-2 animate-[pulse_2s_ease-in-out_infinite] ${isNight ? 'bg-purple-900/40 border-purple-500' : 'bg-green-100 border-green-500 text-green-900'}`}>
                   <h4 className="font-bold text-center mb-2 flex items-center justify-center">
-                    <Play size={16} className="mr-2"/> 你的回合，請操作
+                    <Play size={16} className="mr-2"/> 
+                    {isVotingPhase ? '投票階段' : '你的回合，請操作'}
                   </h4>
                   
                   {/* Guard Action */}
@@ -745,6 +749,22 @@ export default function WerewolfApp() {
                     <button onClick={() => proceedToNextPhase()} className="w-full bg-green-600 text-white py-2 rounded font-bold">結束發言 (過)</button>
                   )}
 
+                  {/* Discussing / Voting Action (含棄票按鈕) */}
+                  {isVotingPhase && (
+                    <div className="space-y-2 text-sm">
+                      <p className="text-center font-bold mb-2">請點擊玩家頭像投票，或選擇棄票</p>
+                      <button 
+                        onClick={() => handlePlayerClick('skip')} 
+                        className={`w-full py-2 rounded font-bold transition-all ${room.votes?.[user.uid] === 'skip' ? 'bg-amber-600 text-white shadow-lg ring-2 ring-amber-300' : 'bg-gray-600 text-gray-200 hover:bg-gray-500'}`}
+                      >
+                        {room.votes?.[user.uid] === 'skip' ? '✔️ 已選擇：棄票' : '我要棄票'}
+                      </button>
+                      <div className="flex justify-center mt-2">
+                         <span className="text-xs opacity-80 text-amber-900 font-bold">目前棄票數: {Object.values(room.votes || {}).filter(v => v === 'skip').length}</span>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Hunter Action */}
                   {room.status === 'hunter_shoot' && (
                     <div className="flex gap-2">
@@ -780,7 +800,7 @@ export default function WerewolfApp() {
                 else if (wolfTargetUI) borderClass = 'border-red-500 bg-red-500/20 shadow-[0_0_15px_rgba(239,68,68,0.5)]';
                 else if (isDayTargeted) borderClass = 'border-amber-500 bg-amber-500/20';
 
-                // 【修復】：即使自己死亡，只要是獵人開槍階段就能互動
+                // 互動權限檢查
                 const canInteract = (me?.isAlive || isHunterShooting) && p.isAlive && (
                   (room.status === 'day' && room.subPhase === 'discussing') || 
                   (myTurn && ['guard', 'witch', 'seer', 'wolf'].includes(room.subPhase)) ||
