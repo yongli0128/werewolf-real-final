@@ -184,7 +184,7 @@ export default function WerewolfApp() {
         if (currentRoom.hunterTriggeredBy === 'vote') {
            updates = {
              status: 'night', subPhase: getNextNightPhase('start', currentRoom.players),
-             votes: {}, nightActions: { wolfVotes: {}, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null },
+             votes: {}, nightActions: { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null },
              logs: arrayUnion({ type: 'sys', message: '天黑請閉眼...', time: Date.now() })
            };
         } else {
@@ -312,7 +312,7 @@ export default function WerewolfApp() {
       updates.logs.push({ type: 'sys', message: '等待獵人開槍...', time: Date.now() + 1 });
     } else {
       updates.status = 'night';
-      updates.nightActions = { wolfVotes: {}, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget || null };
+      updates.nightActions = { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget || null };
       updates.subPhase = getNextNightPhase('start', updatedPlayers);
       updates.logs.push({ type: 'sys', message: '天黑請閉眼...', time: Date.now() + 2 });
     }
@@ -411,7 +411,7 @@ export default function WerewolfApp() {
       subPhase: initialSubPhase,
       players: updatedPlayers,
       votes: {},
-      nightActions: { wolfVotes: {}, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: null },
+      nightActions: { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: null },
       witchState: { hasHeal: true, hasPoison: true },
       winner: null,
       logs: arrayUnion(
@@ -433,7 +433,8 @@ export default function WerewolfApp() {
         setSelectedTarget(targetId);
       }
       else if (room.subPhase === 'wolf' && me.role === '狼人') {
-        await updateDoc(roomRef, { [`nightActions.wolfVotes.${user.uid}`]: targetId });
+        // 狼人共用準星，點擊更新全隊的目標
+        await updateDoc(roomRef, { [`nightActions.sharedWolfTarget`]: targetId });
       } 
       else if (room.subPhase === 'witch' && me.role === '女巫') {
         setSelectedTarget(targetId);
@@ -464,11 +465,8 @@ export default function WerewolfApp() {
       updates['nightActions.guardTarget'] = selectedTarget;
     }
     else if (room.subPhase === 'wolf' && actionType === 'wolf_confirm') {
-      const voteCounts = {};
-      Object.values(room.nightActions?.wolfVotes || {}).forEach(t => { voteCounts[t] = (voteCounts[t] || 0) + 1; });
-      let maxV = 0; let target = null;
-      for (const [t, count] of Object.entries(voteCounts)) { if (count > maxV) { maxV = count; target = t; } }
-      updates['nightActions.wolfTarget'] = target;
+      // 鎖定狼人隊伍共享的目標
+      updates['nightActions.wolfTarget'] = room.nightActions?.sharedWolfTarget || null;
     }
     else if (room.subPhase === 'witch') {
       if (actionType === 'heal') {
@@ -502,7 +500,7 @@ export default function WerewolfApp() {
         if (room.hunterTriggeredBy === 'vote') {
            updates.status = 'night'; 
            updates.subPhase = getNextNightPhase('start', updatedPlayers);
-           updates.nightActions = { wolfVotes: {}, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget };
+           updates.nightActions = { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget };
         } else {
            const aliveIds = updatedPlayers.filter(p => p.isAlive).map(p => p.id);
            updates.status = 'day'; updates.subPhase = 'speaking';
@@ -693,7 +691,8 @@ export default function WerewolfApp() {
                   {/* Wolf Action */}
                   {room.subPhase === 'wolf' && (
                     <div className="flex gap-2">
-                      <button onClick={()=>confirmAction('wolf_confirm')} className="flex-1 bg-red-600 text-white py-2 rounded">狼人確認擊殺</button>
+                      <button onClick={()=>confirmAction('wolf_confirm')} disabled={!room.nightActions?.sharedWolfTarget} className="flex-1 bg-red-600 text-white py-2 rounded disabled:opacity-50">確認擊殺</button>
+                      <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded">不殺 (過)</button>
                     </div>
                   )}
 
@@ -751,15 +750,19 @@ export default function WerewolfApp() {
             <div className="grid grid-cols-2 gap-3">
               {room.players.map(p => {
                 const isSpeaking = (room.status === 'day' && room.subPhase === 'speaking' && room.currentSpeaker === p.id) || (room.status === 'hunter_shoot' && room.currentSpeaker === p.id);
-                const myWolfVote = room.nightActions?.wolfVotes?.[user.uid] === p.id;
-                const totalWolfVotes = Object.values(room.nightActions?.wolfVotes || {}).filter(v => v === p.id).length;
+                
+                // 狼人共享目標 UI 判斷
+                const isFinalWolfTarget = room.status === 'night' && me?.role === '狼人' && room.nightActions?.wolfTarget === p.id;
+                const isSharedWolfTarget = room.status === 'night' && room.subPhase === 'wolf' && me?.role === '狼人' && room.nightActions?.sharedWolfTarget === p.id;
+                const wolfTargetUI = isFinalWolfTarget || isSharedWolfTarget;
+                
                 const isDayTargeted = room.votes?.[user.uid] === p.id;
                 const isSelected = selectedTarget === p.id;
                 
                 let borderClass = 'border-transparent';
                 if (isSpeaking) borderClass = 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]';
                 else if (isSelected) borderClass = 'border-blue-500 bg-blue-500/30'; // Highlight selection for skills
-                else if (myWolfVote) borderClass = 'border-red-500 bg-red-500/20';
+                else if (wolfTargetUI) borderClass = 'border-red-500 bg-red-500/20 shadow-[0_0_15px_rgba(239,68,68,0.5)]';
                 else if (isDayTargeted) borderClass = 'border-amber-500 bg-amber-500/20';
 
                 // Interactions allowed during your turn to select targets
@@ -780,7 +783,6 @@ export default function WerewolfApp() {
                       <p className={`font-semibold text-sm ${!p.isAlive && 'line-through'}`}>{p.name}</p>
                       <div className="flex gap-1 mt-1 h-2">
                          {room.status === 'day' && room.subPhase === 'discussing' && Object.values(room.votes || {}).filter(v => v === p.id).map((_, i) => <div key={`dv-${i}`} className="w-2 h-2 rounded-full bg-amber-500"></div>)}
-                         {room.status === 'night' && me?.role === '狼人' && Array.from({length: totalWolfVotes}).map((_, i) => <div key={`wv-${i}`} className="w-2 h-2 rounded-full bg-red-500"></div>)}
                       </div>
                     </div>
                   </div>
