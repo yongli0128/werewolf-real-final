@@ -529,7 +529,10 @@ export default function WerewolfApp() {
     
     if (!me.isAlive) channel = 'ghost'; 
     else if (room.status === 'night') {
-      if (me.role === '狼人') channel = 'wolf';
+      if (me.role === '狼人') {
+        if (room.subPhase !== 'wolf') return alert('狼人只能在刀人階段交流！');
+        channel = 'wolf';
+      }
       else return alert('黑夜期間只有狼人可以發言！');
     } else if (room.status === 'day' && room.subPhase === 'speaking') {
       if (room.currentSpeaker !== me.id) return alert('現在不是你的發言時間！');
@@ -836,11 +839,11 @@ export default function WerewolfApp() {
           <div className={`p-3 border-t ${isNight ? 'border-slate-700 bg-slate-900 rounded-b-xl' : 'border-[#dcd0b8] bg-[#fdf6e3] rounded-b-xl'}`}>
             <form onSubmit={sendMessage} className="flex space-x-2">
               <input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)}
-                placeholder={!me?.isAlive ? "在靈魂頻道發言..." : room.status === 'night' ? (me?.role === '狼人' ? "與狼伴密謀..." : "黑夜降臨，請保持安靜...") : room.subPhase === 'speaking' ? (room.currentSpeaker === me.id ? "現在是你的發言時間！" : "請聽別人發言...") : "自由討論時間..."}
-                disabled={me?.isAlive && ((room.status === 'night' && me?.role !== '狼人') || (room.status === 'day' && room.subPhase === 'speaking' && room.currentSpeaker !== me?.id))}
+                placeholder={!me?.isAlive ? "在靈魂頻道發言..." : room.status === 'night' ? (me?.role === '狼人' && room.subPhase === 'wolf' ? "與狼伴密謀..." : "黑夜降臨，請保持安靜...") : room.subPhase === 'speaking' ? (room.currentSpeaker === me.id ? "現在是你的發言時間！" : "請聽別人發言...") : "自由討論時間..."}
+                disabled={me?.isAlive && ((room.status === 'night' && (me?.role !== '狼人' || room.subPhase !== 'wolf')) || (room.status === 'day' && room.subPhase === 'speaking' && room.currentSpeaker !== me?.id))}
                 className={`flex-grow px-4 py-2 rounded-full focus:outline-none focus:ring-2 disabled:opacity-50 ${isNight ? 'bg-slate-800 border-slate-700 text-white focus:ring-purple-500 placeholder-slate-500' : 'bg-white border-[#dcd0b8] focus:ring-[#8b5a2b]'} border`}
               />
-              <button type="submit" disabled={me?.isAlive && ((room.status === 'night' && me?.role !== '狼人') || (room.status === 'day' && room.subPhase === 'speaking' && room.currentSpeaker !== me?.id))}
+              <button type="submit" disabled={me?.isAlive && ((room.status === 'night' && (me?.role !== '狼人' || room.subPhase !== 'wolf')) || (room.status === 'day' && room.subPhase === 'speaking' && room.currentSpeaker !== me?.id))}
                 className={`p-2 rounded-full flex items-center justify-center transition disabled:opacity-50 ${isNight ? 'bg-purple-600 hover:bg-purple-700 text-white disabled:bg-slate-700' : 'bg-[#8b5a2b] hover:bg-[#6c4622] text-white disabled:bg-gray-300'}`}
               ><Send size={20} /></button>
             </form>
