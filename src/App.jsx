@@ -133,7 +133,7 @@ export default function WerewolfApp() {
       idx++;
       const nextPhase = NIGHT_PHASE_ORDER[idx];
       if (nextPhase === 'guard' && players.some(p => p.role === '守衛' && p.isAlive)) return nextPhase;
-      if (nextPhase === 'wolf') return nextPhase; // 狼人總是會進階段(如果狼死光遊戲早結束了)
+      if (nextPhase === 'wolf') return nextPhase; // 狼人總是會進階段
       if (nextPhase === 'witch' && players.some(p => p.role === '女巫' && p.isAlive)) return nextPhase;
       if (nextPhase === 'seer' && players.some(p => p.role === '預言家' && p.isAlive)) return nextPhase;
       if (nextPhase === 'night_calc') return nextPhase;
@@ -143,7 +143,10 @@ export default function WerewolfApp() {
 
   // 推進到下一個階段的核心函式
   const proceedToNextPhase = async (customRoomState = null) => {
-    const currentRoom = customRoomState || room;
+    // 修正：確保傳進來的 customRoomState 不是 React 的 Event 物件
+    const isEvent = customRoomState && customRoomState.nativeEvent;
+    const currentRoom = (!isEvent && customRoomState) ? customRoomState : room;
+    
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', currentRoom.id);
     let updates = {};
 
@@ -155,7 +158,6 @@ export default function WerewolfApp() {
       if (nextSub !== 'night_calc') {
         updates.logs = arrayUnion({ type: 'sys', message: `系統：現在是 ${PHASE_NAMES[nextSub]} 的回合`, time: Date.now() });
       } else {
-        // 直接執行結算
         await updateDoc(roomRef, updates);
         return performNightCalculation({ ...currentRoom, ...updates });
       }
@@ -179,7 +181,6 @@ export default function WerewolfApp() {
       if (winner) {
         updates = { winner, status: 'ended' };
       } else {
-        // 如果是白天被票死開槍 -> 進黑夜。如果是晚上死開槍 -> 進白天發言
         if (currentRoom.hunterTriggeredBy === 'vote') {
            updates = {
              status: 'night', subPhase: getNextNightPhase('start', currentRoom.players),
@@ -209,13 +210,10 @@ export default function WerewolfApp() {
     let deadIds = [];
     let nightLog = '昨晚是平安夜。';
 
-    // 判斷狼刀與守衛、女巫
     let wolfKillSuccess = false;
     if (wolfTarget) {
       const isGuarded = (wolfTarget === guardTarget);
       const isHealed = witchHeal;
-      
-      // 同守同救 = 死 (奶穿)
       if (isGuarded && isHealed) wolfKillSuccess = true;
       else if (!isGuarded && !isHealed) wolfKillSuccess = true;
     }
@@ -230,7 +228,6 @@ export default function WerewolfApp() {
       if (deadIds.includes(p.id)) {
         if (p.role === '獵人') {
           hunterId = p.id;
-          // 毒死的獵人不能開槍
           if (witchPoison !== p.id) hunterCanShoot = true;
         }
         return { ...p, isAlive: false };
@@ -247,7 +244,7 @@ export default function WerewolfApp() {
     let updates = { 
       players: updatedPlayers, 
       logs: arrayUnion({ type: 'sys', message: nightLog, time: Date.now() }),
-      'nightActions.lastGuardTarget': guardTarget || null // 記錄今晚守護的人，明晚不能守
+      'nightActions.lastGuardTarget': guardTarget || null
     };
 
     if (winner) {
@@ -315,13 +312,31 @@ export default function WerewolfApp() {
       updates.logs.push({ type: 'sys', message: '等待獵人開槍...', time: Date.now() + 1 });
     } else {
       updates.status = 'night';
-      // 重新整理夜晚變數，但保留 lastGuardTarget 和 witchState
       updates.nightActions = { wolfVotes: {}, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget || null };
       updates.subPhase = getNextNightPhase('start', updatedPlayers);
       updates.logs.push({ type: 'sys', message: '天黑請閉眼...', time: Date.now() + 2 });
     }
 
     await updateDoc(roomRef, updates);
+  };
+
+  // 重新啟動遊戲 (再來一局)
+  const resetGame = async () => {
+    if (room.hostId !== user.uid) return;
+    const resetPlayers = room.players.map(p => ({ ...p, role: '未知', isAlive: true }));
+    
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), {
+      status: 'waiting',
+      subPhase: '',
+      speakerQueue: [],
+      currentSpeaker: null,
+      players: resetPlayers,
+      votes: {},
+      nightActions: { lastGuardTarget: null },
+      witchState: { hasHeal: true, hasPoison: true },
+      winner: null,
+      logs: arrayUnion({ type: 'sys', message: '主持人已重新啟動遊戲，請等待分配職業。', time: Date.now() })
+    });
   };
 
   // --- UI Action Handlers ---
@@ -340,7 +355,7 @@ export default function WerewolfApp() {
       subPhase: '', 
       speakerQueue: [],
       currentSpeaker: null,
-      roleConfig: { '狼人': 3, '預言家': 1, '女巫': 1, '獵人': 1, '守衛': 1, '村民': 3 }, // 預設 10人局
+      roleConfig: { '狼人': 3, '預言家': 1, '女巫': 1, '獵人': 1, '守衛': 1, '村民': 3 },
       players: [{ id: user.uid, name: playerName, role: '未知', isAlive: true, avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${user.uid}` }],
       chat: [],
       logs: [{ type: 'system', message: `房間 ${code} 建立成功`, time: Date.now() }],
@@ -407,7 +422,6 @@ export default function WerewolfApp() {
     setIsCardFlipped(false);
   };
 
-  // 處理點擊玩家頭像
   const handlePlayerClick = async (targetId) => {
     const me = room.players.find(p => p.id === user.uid);
     if (!me || !me.isAlive) return;
@@ -436,7 +450,6 @@ export default function WerewolfApp() {
     }
   };
 
-  // 技能確認按鈕 (守衛確認、預言家查驗、女巫用毒、獵人開槍、狼人確認擊殺、或直接點「過」)
   const confirmAction = async (actionType) => {
     const me = room.players.find(p => p.id === user.uid);
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id);
@@ -451,7 +464,6 @@ export default function WerewolfApp() {
       updates['nightActions.guardTarget'] = selectedTarget;
     }
     else if (room.subPhase === 'wolf' && actionType === 'wolf_confirm') {
-      // 結算狼刀結果 (取票數最多者，簡化為系統直接鎖定)
       const voteCounts = {};
       Object.values(room.nightActions?.wolfVotes || {}).forEach(t => { voteCounts[t] = (voteCounts[t] || 0) + 1; });
       let maxV = 0; let target = null;
@@ -474,7 +486,7 @@ export default function WerewolfApp() {
       setSeerResult(`${target.name} 的身分是：${isBad ? '🐺 狼人' : '🧑‍🌾 好人'}`);
       updates['nightActions.seerChecked'] = true;
       await updateDoc(roomRef, updates);
-      return; // 查驗完不馬上進下回合，讓預言家看結果後自己點「過」
+      return; 
     }
     else if (room.status === 'hunter_shoot' && actionType === 'shoot') {
       const target = room.players.find(p => p.id === selectedTarget);
@@ -511,7 +523,8 @@ export default function WerewolfApp() {
 
   const sendMessage = async (e) => {
     e.preventDefault();
-    if (!chatInput.trim()) return;
+    const textToSend = chatInput.trim();
+    if (!textToSend) return;
 
     let channel = 'general';
     const me = room.players.find(p => p.id === user.uid);
@@ -524,9 +537,10 @@ export default function WerewolfApp() {
       if (room.currentSpeaker !== me.id) return alert('現在不是你的發言時間！');
     }
 
-    const msg = { id: Date.now().toString(), senderId: user.uid, senderName: me.name, text: chatInput.trim(), channel, time: Date.now() };
-    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), { chat: arrayUnion(msg) });
+    // 優化：送出後立刻清空輸入框，提升打字體驗
     setChatInput('');
+    const msg = { id: Date.now().toString(), senderId: user.uid, senderName: me.name, text: textToSend, channel, time: Date.now() };
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), { chat: arrayUnion(msg) });
   };
 
   // --- Render Helpers ---
@@ -580,12 +594,18 @@ export default function WerewolfApp() {
       {/* 勝利結算動畫 Overlay */}
       {room.winner && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm transition-opacity">
-          <div className="text-center animate-[bounce_2s_ease-in-out_infinite]">
-            <h1 className={`text-6xl md:text-8xl font-black mb-4 drop-shadow-[0_0_20px_rgba(255,255,255,0.5)] ${room.winner === 'good' ? 'text-blue-400' : 'text-red-500'}`}>
+          <div className="text-center">
+            <h1 className={`animate-[bounce_2s_ease-in-out_infinite] text-6xl md:text-8xl font-black mb-8 drop-shadow-[0_0_20px_rgba(255,255,255,0.5)] ${room.winner === 'good' ? 'text-blue-400' : 'text-red-500'}`}>
               {room.winner === 'good' ? '好人陣營 勝利！' : '狼人陣營 勝利！'}
             </h1>
-            <p className="text-white text-xl">遊戲結束，請主持人重新建立房間。</p>
-            <button onClick={leaveRoom} className="mt-8 bg-gray-700 hover:bg-gray-600 text-white px-8 py-3 rounded-full font-bold">離開房間</button>
+            <div className="space-y-4 md:space-y-0 md:space-x-4">
+              {isHost ? (
+                <button onClick={resetGame} className="w-full md:w-auto bg-blue-600 hover:bg-blue-500 text-white px-8 py-3 rounded-full font-bold">再來一局</button>
+              ) : (
+                <p className="text-white text-xl mb-4">等待主持人重新啟動遊戲...</p>
+              )}
+              <button onClick={leaveRoom} className="w-full md:w-auto bg-gray-700 hover:bg-gray-600 text-white px-8 py-3 rounded-full font-bold">離開房間</button>
+            </div>
           </div>
         </div>
       )}
@@ -708,7 +728,7 @@ export default function WerewolfApp() {
 
                   {/* Speaking Action */}
                   {room.subPhase === 'speaking' && (
-                    <button onClick={proceedToNextPhase} className="w-full bg-green-600 text-white py-2 rounded font-bold">結束發言 (過)</button>
+                    <button onClick={() => proceedToNextPhase()} className="w-full bg-green-600 text-white py-2 rounded font-bold">結束發言 (過)</button>
                   )}
 
                   {/* Hunter Action */}
