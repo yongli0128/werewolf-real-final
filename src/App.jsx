@@ -112,8 +112,25 @@ export default function WerewolfApp() {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [room?.chat, room?.logs]);
 
-  // 【終極升級】無敵版防錯屠邊判定引擎
-  const checkWinCondition = (players) => {
+  // 【新增】自動結算投票 (當所有存活玩家都投票時)
+  useEffect(() => {
+    if (room && room.status === 'day' && room.subPhase === 'discussing' && room.hostId === user?.uid) {
+      const alivePlayersCount = room.players.filter(p => p.isAlive).length;
+      const currentVotesCount = Object.keys(room.votes || {}).length;
+      
+      // 只要總票數等於存活人數，就觸發自動結算
+      if (alivePlayersCount > 0 && currentVotesCount === alivePlayersCount) {
+        // 延遲 1.5 秒，讓玩家能看一眼最終票型
+        const timer = setTimeout(() => {
+          performVoteCalculation(room);
+        }, 1500);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [room?.votes, room?.status, room?.subPhase, room?.hostId, user?.uid]);
+
+  // 智慧屠邊偵測引擎
+  const checkWinCondition = (players, roleConfig) => {
     let aliveWolves = 0;
     let aliveGods = 0;
     let aliveVillagers = 0;
@@ -121,7 +138,6 @@ export default function WerewolfApp() {
     let totalGods = 0;
     let totalVillagers = 0;
 
-    // 實時清點場上「所有」玩家的真實狀態，不依賴設定檔，完全防錯！
     players.forEach(p => {
       if (p.role === '狼人') {
         if (p.isAlive) aliveWolves++;
@@ -134,10 +150,7 @@ export default function WerewolfApp() {
       }
     });
 
-    // 狼人死光，好人必定勝利 (優先度最高)
     if (aliveWolves === 0) return 'good'; 
-
-    // 屠邊條件：只要該陣營有配置人，且活人歸零，狼人就獲勝
     if (totalGods > 0 && aliveGods === 0) return 'wolf'; 
     if (totalVillagers > 0 && aliveVillagers === 0) return 'wolf'; 
     
@@ -189,7 +202,7 @@ export default function WerewolfApp() {
       }
     }
     else if (currentRoom.status === 'hunter_shoot') {
-      const winner = checkWinCondition(currentRoom.players);
+      const winner = checkWinCondition(currentRoom.players, currentRoom.roleConfig);
       if (winner) {
         updates = { winner, status: 'ended' };
       } else {
@@ -252,7 +265,7 @@ export default function WerewolfApp() {
       nightLog = `昨晚，${deadNames} 死亡了。`;
     }
 
-    const winner = checkWinCondition(updatedPlayers);
+    const winner = checkWinCondition(updatedPlayers, currentRoom.roleConfig);
     const newLogs = [{ type: 'sys', message: nightLog, time: Date.now() }];
     
     let updates = { 
@@ -281,10 +294,12 @@ export default function WerewolfApp() {
     await updateDoc(roomRef, updates);
   };
 
-  const performVoteCalculation = async () => {
-    const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id);
+  const performVoteCalculation = async (currentRoom) => {
+    // 【修改】確保接收到的 currentRoom 狀態是最新的
+    const targetRoom = currentRoom || room;
+    const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', targetRoom.id);
     const voteCounts = {};
-    Object.values(room.votes || {}).forEach(target => { voteCounts[target] = (voteCounts[target] || 0) + 1; });
+    Object.values(targetRoom.votes || {}).forEach(target => { voteCounts[target] = (voteCounts[target] || 0) + 1; });
     
     let maxVotes = 0; let exiledId = null;
     for (const [target, count] of Object.entries(voteCounts)) {
@@ -292,26 +307,36 @@ export default function WerewolfApp() {
       else if (count === maxVotes) { exiledId = null; } 
     }
 
-    let updatedPlayers = [...room.players];
+    let updatedPlayers = [...targetRoom.players];
     let voteLog = '投票結果平局，沒有人被放逐。';
     let isHunterExiled = false;
+
+    // 【新增】過半數放逐規則
+    const alivePlayersCount = updatedPlayers.filter(p => p.isAlive).length;
+    const requiredVotes = Math.floor(alivePlayersCount / 2); // 必須「大於」這個數字
 
     if (exiledId === 'skip') {
       voteLog = '多數玩家選擇棄票，沒有人被放逐。';
       exiledId = null;
     } else if (exiledId) {
-      updatedPlayers = updatedPlayers.map(p => {
-        if (p.id === exiledId) {
-          if (p.role === '獵人') isHunterExiled = true;
-          return { ...p, isAlive: false };
-        }
-        return p;
-      });
-      const exiledPlayer = room.players.find(p => p.id === exiledId);
-      voteLog = `投票結束，${exiledPlayer?.name} 被放逐了。`;
+      if (maxVotes > requiredVotes) {
+        updatedPlayers = updatedPlayers.map(p => {
+          if (p.id === exiledId) {
+            if (p.role === '獵人') isHunterExiled = true;
+            return { ...p, isAlive: false };
+          }
+          return p;
+        });
+        const exiledPlayer = targetRoom.players.find(p => p.id === exiledId);
+        voteLog = `投票結束，${exiledPlayer?.name} 獲得 ${maxVotes} 票被放逐了。`;
+      } else {
+        const targetPlayer = targetRoom.players.find(p => p.id === exiledId);
+        voteLog = `投票結束，最高票 ${targetPlayer?.name}(${maxVotes}票) 未達存活人數(${alivePlayersCount}人)半數，沒有人被放逐。`;
+        exiledId = null; // 取消放逐
+      }
     }
 
-    const winner = checkWinCondition(updatedPlayers);
+    const winner = checkWinCondition(updatedPlayers, targetRoom.roleConfig);
     const newLogs = [{ type: 'sys', message: voteLog, time: Date.now() }];
     
     let updates = {
@@ -329,7 +354,7 @@ export default function WerewolfApp() {
       updates.status = 'ended';
     } else {
       updates.status = 'night';
-      updates.nightActions = { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget || null };
+      updates.nightActions = { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: targetRoom.nightActions?.lastGuardTarget || null };
       updates.subPhase = getNextNightPhase('start', updatedPlayers);
       newLogs.push({ type: 'sys', message: '天黑請閉眼...', time: Date.now() + 2 });
     }
@@ -515,8 +540,7 @@ export default function WerewolfApp() {
       let updatedPlayers = room.players.map(p => p.id === selectedTarget ? { ...p, isAlive: false } : p);
       updates.players = updatedPlayers;
       
-      // 開槍後立刻做全陣營的結算檢測
-      const winner = checkWinCondition(updatedPlayers);
+      const winner = checkWinCondition(updatedPlayers, room.roleConfig);
       if (winner) {
         updates.winner = winner; updates.status = 'ended';
       } else {
@@ -568,7 +592,8 @@ export default function WerewolfApp() {
 
   const hostForceNext = async () => {
     if (room.status === 'day' && room.subPhase === 'discussing') {
-      await performVoteCalculation();
+      // 主持人依舊可以手動強制結算（若有人一直不投票）
+      await performVoteCalculation(room);
     } else if (room.status === 'night' && room.subPhase === 'night_calc') {
       await performNightCalculation(room);
     } else {
@@ -781,7 +806,7 @@ export default function WerewolfApp() {
                         {room.votes?.[user.uid] === 'skip' ? '✔️ 已選擇：棄票' : '我要棄票'}
                       </button>
                       <div className="flex justify-center mt-2">
-                         <span className="text-xs opacity-80 text-amber-900 font-bold">目前棄票數: {Object.values(room.votes || {}).filter(v => v === 'skip').length}</span>
+                         <span className="text-xs opacity-80 text-amber-900 font-bold">目前已投票人數: {Object.keys(room.votes || {}).length} / {room.players.filter(p=>p.isAlive).length}</span>
                       </div>
                     </div>
                   )}
