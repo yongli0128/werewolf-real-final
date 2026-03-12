@@ -11,7 +11,7 @@ import {
   LogOut, Vote, Plus, Minus, Mic, Target, HeartPulse, ShieldAlert
 } from 'lucide-react';
 
-// --- Firebase Initialization ---
+// 👇👇👇 ⚠️ 如果在本地 VS Code 執行，請將下面這段換成你自己的 Firebase 金鑰 ⚠️ 👇👇👇
 const firebaseConfig = {
   apiKey: "AIzaSyCi7lXBAESeCpXpxZho7wz5i6KMpY9XfmA",
   authDomain: "hol-4e473.firebaseapp.com",
@@ -20,6 +20,9 @@ const firebaseConfig = {
   messagingSenderId: "665755863496",
   appId: "1:665755863496:web:7ad0698d2360fc577898fd"
 };
+// 👆👆👆 ⚠️ 請將上面這段換成你自己的 Firebase 金鑰 ⚠️ 👆👆👆
+
+const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'werewolf-web-app';
@@ -109,14 +112,35 @@ export default function WerewolfApp() {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [room?.chat, room?.logs]);
 
-
+  // 【終極升級】無敵版防錯屠邊判定引擎
   const checkWinCondition = (players) => {
-    const wolves = players.filter(p => p.role === '狼人' && p.isAlive).length;
-    const gods = players.filter(p => ['預言家', '女巫', '獵人', '守衛'].includes(p.role) && p.isAlive).length;
-    const villagers = players.filter(p => p.role === '村民' && p.isAlive).length;
+    let aliveWolves = 0;
+    let aliveGods = 0;
+    let aliveVillagers = 0;
+    
+    let totalGods = 0;
+    let totalVillagers = 0;
 
-    if (wolves === 0) return 'good'; 
-    if (gods === 0 || villagers === 0) return 'wolf'; 
+    // 實時清點場上「所有」玩家的真實狀態，不依賴設定檔，完全防錯！
+    players.forEach(p => {
+      if (p.role === '狼人') {
+        if (p.isAlive) aliveWolves++;
+      } else if (['預言家', '女巫', '獵人', '守衛'].includes(p.role)) {
+        totalGods++;
+        if (p.isAlive) aliveGods++;
+      } else if (p.role === '村民') {
+        totalVillagers++;
+        if (p.isAlive) aliveVillagers++;
+      }
+    });
+
+    // 狼人死光，好人必定勝利 (優先度最高)
+    if (aliveWolves === 0) return 'good'; 
+
+    // 屠邊條件：只要該陣營有配置人，且活人歸零，狼人就獲勝
+    if (totalGods > 0 && aliveGods === 0) return 'wolf'; 
+    if (totalVillagers > 0 && aliveVillagers === 0) return 'wolf'; 
+    
     return null;
   };
 
@@ -172,7 +196,7 @@ export default function WerewolfApp() {
         if (currentRoom.hunterTriggeredBy === 'vote') {
            updates = {
              status: 'night', subPhase: getNextNightPhase('start', currentRoom.players),
-             votes: {}, nightActions: { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null },
+             votes: {}, nightActions: { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: currentRoom.nightActions?.lastGuardTarget || null },
              logs: arrayUnion({ type: 'sys', message: '天黑請閉眼...', time: Date.now() })
            };
         } else {
@@ -216,7 +240,7 @@ export default function WerewolfApp() {
       if (deadIds.includes(p.id)) {
         if (p.role === '獵人') {
           hunterId = p.id;
-          if (witchPoison !== p.id) hunterCanShoot = true;
+          if (witchPoison !== p.id) hunterCanShoot = true; 
         }
         return { ...p, isAlive: false };
       }
@@ -236,14 +260,14 @@ export default function WerewolfApp() {
       'nightActions.lastGuardTarget': guardTarget || null
     };
 
-    if (winner) {
-      updates.winner = winner;
-      updates.status = 'ended';
-    } else if (hunterCanShoot) {
+    if (hunterCanShoot) {
       updates.status = 'hunter_shoot';
       updates.hunterTriggeredBy = 'night';
       updates.currentSpeaker = hunterId;
       newLogs.push({ type: 'sys', message: '等待獵人發動技能...', time: Date.now() + 1 });
+    } else if (winner) {
+      updates.winner = winner;
+      updates.status = 'ended';
     } else {
       const aliveIds = updatedPlayers.filter(p => p.isAlive).map(p => p.id);
       updates.status = 'day';
@@ -265,14 +289,13 @@ export default function WerewolfApp() {
     let maxVotes = 0; let exiledId = null;
     for (const [target, count] of Object.entries(voteCounts)) {
       if (count > maxVotes) { maxVotes = count; exiledId = target; } 
-      else if (count === maxVotes) { exiledId = null; }
+      else if (count === maxVotes) { exiledId = null; } 
     }
 
     let updatedPlayers = [...room.players];
     let voteLog = '投票結果平局，沒有人被放逐。';
     let isHunterExiled = false;
 
-    // 處理棄票邏輯
     if (exiledId === 'skip') {
       voteLog = '多數玩家選擇棄票，沒有人被放逐。';
       exiledId = null;
@@ -296,14 +319,14 @@ export default function WerewolfApp() {
       votes: {}
     };
 
-    if (winner) {
-      updates.winner = winner;
-      updates.status = 'ended';
-    } else if (isHunterExiled) {
+    if (isHunterExiled) {
       updates.status = 'hunter_shoot';
       updates.hunterTriggeredBy = 'vote';
       updates.currentSpeaker = exiledId;
       newLogs.push({ type: 'sys', message: '等待獵人開槍...', time: Date.now() + 1 });
+    } else if (winner) {
+      updates.winner = winner;
+      updates.status = 'ended';
     } else {
       updates.status = 'night';
       updates.nightActions = { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget || null };
@@ -438,7 +461,6 @@ export default function WerewolfApp() {
       }
     } 
     else if (room.status === 'day' && room.subPhase === 'discussing') {
-      // 在討論階段將目標存入 votes (包含 targetId === 'skip' 的情況)
       await updateDoc(roomRef, { [`votes.${user.uid}`]: targetId });
     }
     else if (isHunterShooting) {
@@ -493,6 +515,7 @@ export default function WerewolfApp() {
       let updatedPlayers = room.players.map(p => p.id === selectedTarget ? { ...p, isAlive: false } : p);
       updates.players = updatedPlayers;
       
+      // 開槍後立刻做全陣營的結算檢測
       const winner = checkWinCondition(updatedPlayers);
       if (winner) {
         updates.winner = winner; updates.status = 'ended';
@@ -553,7 +576,6 @@ export default function WerewolfApp() {
     }
   };
 
-  // --- Render Helpers ---
   if (!user) return <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white font-sans">載入中...</div>;
 
   const isNight = room?.status === 'night';
@@ -565,7 +587,6 @@ export default function WerewolfApp() {
   const isHunterShooting = room?.status === 'hunter_shoot' && me?.id === room?.currentSpeaker;
   const isVotingPhase = room?.status === 'day' && room?.subPhase === 'discussing' && me?.isAlive;
 
-  // 加入投票階段，讓操作面板可以在白天投票時顯示
   const myTurn = (room?.status === 'night' && room?.subPhase === 'guard' && me?.role === '守衛' && me?.isAlive) ||
                  (room?.status === 'night' && room?.subPhase === 'wolf' && me?.role === '狼人' && me?.isAlive) ||
                  (room?.status === 'night' && room?.subPhase === 'witch' && me?.role === '女巫' && me?.isAlive) ||
@@ -752,7 +773,7 @@ export default function WerewolfApp() {
                   {/* Discussing / Voting Action (含棄票按鈕) */}
                   {isVotingPhase && (
                     <div className="space-y-2 text-sm">
-                      <p className="text-center font-bold mb-2">請點擊玩家頭像投票，或選擇棄票</p>
+                      <p className="text-center font-bold mb-2 text-amber-900">請點擊玩家頭像投票，或選擇棄票</p>
                       <button 
                         onClick={() => handlePlayerClick('skip')} 
                         className={`w-full py-2 rounded font-bold transition-all ${room.votes?.[user.uid] === 'skip' ? 'bg-amber-600 text-white shadow-lg ring-2 ring-amber-300' : 'bg-gray-600 text-gray-200 hover:bg-gray-500'}`}
@@ -786,7 +807,6 @@ export default function WerewolfApp() {
               {room.players.map(p => {
                 const isSpeaking = (room.status === 'day' && room.subPhase === 'speaking' && room.currentSpeaker === p.id) || (room.status === 'hunter_shoot' && room.currentSpeaker === p.id);
                 
-                // 狼人共享目標 UI 判斷
                 const isFinalWolfTarget = room.status === 'night' && me?.role === '狼人' && room.nightActions?.wolfTarget === p.id;
                 const isSharedWolfTarget = room.status === 'night' && room.subPhase === 'wolf' && me?.role === '狼人' && room.nightActions?.sharedWolfTarget === p.id;
                 const wolfTargetUI = isFinalWolfTarget || isSharedWolfTarget;
@@ -800,7 +820,6 @@ export default function WerewolfApp() {
                 else if (wolfTargetUI) borderClass = 'border-red-500 bg-red-500/20 shadow-[0_0_15px_rgba(239,68,68,0.5)]';
                 else if (isDayTargeted) borderClass = 'border-amber-500 bg-amber-500/20';
 
-                // 互動權限檢查
                 const canInteract = (me?.isAlive || isHunterShooting) && p.isAlive && (
                   (room.status === 'day' && room.subPhase === 'discussing') || 
                   (myTurn && ['guard', 'witch', 'seer', 'wolf'].includes(room.subPhase)) ||
@@ -826,7 +845,7 @@ export default function WerewolfApp() {
             </div>
           </div>
 
-          {/* Host Controls (Fallback/Force Tools) */}
+          {/* Host Controls */}
           {isHost && (
             <div className={`rounded-xl p-3 shadow-sm border-2 border-dashed ${isNight ? 'bg-slate-900 border-slate-700' : 'bg-amber-100/50 border-amber-300'}`}>
               <h3 className="font-bold text-xs mb-2 opacity-60 flex items-center"><Play size={12} className="mr-1"/> 主持人工具</h3>
