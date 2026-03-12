@@ -13,7 +13,6 @@ import {
 
 // --- Firebase Initialization ---
 // 注意：這裡保留了預覽環境的寫法，請記得在你的 VS Code 裡替換成你的 firebaseConfig！
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
 const firebaseConfig = {
   apiKey: "AIzaSyCi7lXBAESeCpXpxZho7wz5i6KMpY9XfmA",
   authDomain: "hol-4e473.firebaseapp.com",
@@ -22,6 +21,7 @@ const firebaseConfig = {
   messagingSenderId: "665755863496",
   appId: "1:665755863496:web:7ad0698d2360fc577898fd"
 };
+const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'werewolf-web-app';
