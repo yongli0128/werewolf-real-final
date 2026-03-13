@@ -17,7 +17,7 @@ const firebaseConfig = typeof __firebase_config !== 'undefined' && __firebase_co
   ? JSON.parse(__firebase_config) 
   : {
       // 👇👇👇 ⚠️ 如果要在 Vercel 部署，請將這裡換成你真實的 Firebase 金鑰 ⚠️ 👇👇👇
-      apiKey: "AIzaSyCi7lXBAESeCpXpxZho7wz5i6KMpY9XfmA",
+     apiKey: "AIzaSyCi7lXBAESeCpXpxZho7wz5i6KMpY9XfmA",
   authDomain: "hol-4e473.firebaseapp.com",
   projectId: "hol-4e473",
   storageBucket: "hol-4e473.firebasestorage.app",
@@ -50,11 +50,11 @@ const VILLAGER_ROLES = ['村民'];
 
 const ROLES_INFO = {
   '狼人': { desc: '夜間可與同伴討論並殺害一名玩家。', color: 'text-red-500', icon: Skull },
-  '狼王': { desc: '死後可以開槍帶走一名玩家(被毒除外)。', color: 'text-red-700', icon: Crown },
+  '狼王': { desc: '死後可以開槍帶走一名玩家(被毒除外)。可選擇不開槍。', color: 'text-red-700', icon: Crown },
   '雪狼': { desc: '無法被預言家查出狼人身分，參與夜間擊殺。', color: 'text-blue-300', icon: Snowflake },
   '預言家': { desc: '夜間可查驗一名玩家的真實身分。', color: 'text-blue-500', icon: Eye },
   '女巫': { desc: '擁有一瓶解藥與一瓶毒藥。', color: 'text-purple-500', icon: HeartPulse },
-  '獵人': { desc: '死後可以開槍帶走一名玩家。', color: 'text-orange-500', icon: Target },
+  '獵人': { desc: '死後可以開槍帶走一名玩家。可選擇不開槍。', color: 'text-orange-500', icon: Target },
   '守衛': { desc: '每晚可守護一名玩家免受狼害(不可連守)。', color: 'text-indigo-400', icon: ShieldAlert },
   '騎士': { desc: '白天隨時可決鬥查驗一人，若為狼則狼死，否則自盡。', color: 'text-yellow-600', icon: Sword },
   '白癡': { desc: '被投票出局可翻牌免死，但失去投票與被投票權。', color: 'text-green-800', icon: Frown },
@@ -82,7 +82,6 @@ export default function WerewolfApp() {
   const [isCardFlipped, setIsCardFlipped] = useState(false);
   const [initError, setInitError] = useState(null);
   
-  // 【新增】防連點與網路延遲的 Loading 狀態
   const [isProcessing, setIsProcessing] = useState(false);
 
   const [showRoleModal, setShowRoleModal] = useState(false);
@@ -139,7 +138,6 @@ export default function WerewolfApp() {
     }
   }, [room?.status]);
 
-  // 【新增】每當遊戲階段推進成功，自動解除按鈕的 Loading 鎖定
   useEffect(() => {
     setIsProcessing(false);
   }, [room?.subPhase, room?.status, room?.currentSpeaker, room?.nightActions?.seerChecked, room?.knightUsed]);
@@ -291,7 +289,7 @@ export default function WerewolfApp() {
     }
 
     if (Object.keys(updates).length > 0) {
-      updateDoc(roomRef, updates).catch(console.error); // 優化：背景執行不阻擋
+      updateDoc(roomRef, updates).catch(console.error); 
     }
   };
 
@@ -346,7 +344,7 @@ export default function WerewolfApp() {
       updates.status = 'hunter_shoot';
       updates.hunterTriggeredBy = 'night';
       updates.currentSpeaker = shooterId;
-      newLogs.push({ type: 'sys', message: '等待技能(獵人/狼王)發動...', time: Date.now() + 1 });
+      newLogs.push({ type: 'sys', message: '等待技能發動...', time: Date.now() + 1 });
     } else if (winner) {
       updates.winner = winner;
       updates.status = 'ended';
@@ -434,7 +432,7 @@ export default function WerewolfApp() {
       updates.status = 'hunter_shoot';
       updates.hunterTriggeredBy = 'vote';
       updates.currentSpeaker = exiledId;
-      newLogs.push({ type: 'sys', message: '等待技能(獵人/狼王)開槍...', time: Date.now() + 1 });
+      newLogs.push({ type: 'sys', message: '等待技能開槍...', time: Date.now() + 1 });
     } else if (winner) {
       updates.winner = winner;
       updates.status = 'ended';
@@ -487,7 +485,7 @@ export default function WerewolfApp() {
       speakerQueue: [],
       currentSpeaker: null,
       roleConfig: { '狼人': 2, '狼王': 1, '預言家': 1, '女巫': 1, '獵人': 1, '守衛': 1, '騎士': 1, '白癡': 1, '村民': 3, '雪狼': 0 },
-      advancedSettings: { knightCanDuelDuringVote: true }, 
+      advancedSettings: { knightCanDuelDuringVote: true, knightSealsSkill: true }, // 新增開關
       players: [{ id: user.uid, name: playerName, role: '未知', isAlive: true, isIdiotRevealed: false, avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${user.uid}` }],
       chat: [],
       logs: [{ type: 'system', message: `房間 ${code} 建立成功`, time: Date.now() }],
@@ -533,7 +531,6 @@ export default function WerewolfApp() {
     const currentCount = room.roleConfig[role] || 0;
     const newCount = Math.max(0, currentCount + delta);
     
-    // 【樂觀更新 Optimistic UI】瞬間切換數字，提升手感
     setRoom(prev => ({
        ...prev,
        roleConfig: { ...prev.roleConfig, [role]: newCount }
@@ -545,7 +542,6 @@ export default function WerewolfApp() {
     if (room.hostId !== user.uid || room.status !== 'waiting') return;
     const newValue = !room.advancedSettings?.[settingKey];
     
-    // 【樂觀更新】瞬間切換開關
     setRoom(prev => ({
        ...prev,
        advancedSettings: { ...prev.advancedSettings, [settingKey]: newValue }
@@ -603,7 +599,6 @@ export default function WerewolfApp() {
         setSelectedTarget(targetId);
       }
       else if (room.subPhase === 'wolf' && WOLF_ROLES.includes(me.role)) {
-        // 【樂觀更新】點選狼人目標瞬間亮起，不卡頓
         setRoom(prev => ({
           ...prev,
           nightActions: { ...(prev.nightActions || {}), sharedWolfTarget: targetId }
@@ -618,7 +613,6 @@ export default function WerewolfApp() {
       }
     } 
     else if (room.status === 'day' && room.subPhase === 'discussing' && !me.isIdiotRevealed) {
-      // 【樂觀更新】點擊投票瞬間完成
       setRoom(prev => ({
         ...prev,
         votes: { ...(prev.votes || {}), [user.uid]: targetId }
@@ -636,7 +630,7 @@ export default function WerewolfApp() {
 
   const confirmAction = async (actionType) => {
     if (isProcessing) return;
-    setIsProcessing(true); // 鎖定按鈕，防止連點
+    setIsProcessing(true); 
 
     const me = room.players.find(p => p.id === user.uid);
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id);
@@ -645,7 +639,23 @@ export default function WerewolfApp() {
 
     if (actionType === 'pass') {
       setSelectedTarget(null);
-      return proceedToNextPhase(); // 內部會有自己的非同步處理
+      
+      if (room.status === 'hunter_shoot') {
+          updates.logs = arrayUnion({ type: 'sys', message: `${me.role} 選擇不發動技能。`, time: Date.now() });
+          if (room.hunterTriggeredBy === 'vote' || room.hunterTriggeredBy === 'knight') {
+             updates.status = 'night'; 
+             updates.subPhase = getNextNightPhase('start', room.players);
+             updates.nightActions = { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget };
+          } else {
+             const aliveIds = room.players.filter(p => p.isAlive).map(p => p.id);
+             updates.status = 'day'; updates.subPhase = 'speaking';
+             updates.speakerQueue = aliveIds; updates.currentSpeaker = aliveIds[0] || null;
+          }
+          await updateDoc(roomRef, updates);
+          return;
+      }
+      
+      return proceedToNextPhase(); 
     }
 
     if (room.subPhase === 'guard' && actionType === 'guard') {
@@ -678,19 +688,28 @@ export default function WerewolfApp() {
       setSeerResult(`${target.name} 的身分是：${isBad ? '🐺 狼人' : '🧑‍🌾 好人'}`);
       updates['nightActions.seerChecked'] = true;
       await updateDoc(roomRef, updates);
-      // 這裡不解開 isProcessing，讓它在點擊「確認 (過)」時處理
       setIsProcessing(false);
       return; 
     }
     else if (room.status === 'hunter_shoot' && actionType === 'shoot') {
       const target = room.players.find(p => p.id === selectedTarget);
-      updates.logs = arrayUnion({ type: 'sys', message: `${me.role} 開槍帶走了 ${target.name}！`, time: Date.now() });
+      updates.logs = arrayUnion({ type: 'sys', message: `${me.role} 發動技能，帶走了 ${target.name}！`, time: Date.now() });
       
       let updatedPlayers = room.players.map(p => p.id === selectedTarget ? { ...p, isAlive: false } : p);
       updates.players = updatedPlayers;
       
       const winner = checkWinCondition(updatedPlayers, room.roleConfig);
-      if (winner) {
+      
+      if (['獵人', '狼王'].includes(target.role) && !winner) {
+          updates.status = 'hunter_shoot';
+          updates.hunterTriggeredBy = room.hunterTriggeredBy; 
+          updates.currentSpeaker = target.id;
+          updates.logs = arrayUnion(
+              { type: 'sys', message: `${me.role} 發動技能，帶走了 ${target.name}！`, time: Date.now() },
+              { type: 'sys', message: `${target.name} (${target.role}) 死亡，等待技能發動...`, time: Date.now() + 1 }
+          );
+      } 
+      else if (winner) {
         updates.winner = winner; updates.status = 'ended';
       } else {
         if (room.hunterTriggeredBy === 'vote' || room.hunterTriggeredBy === 'knight') {
@@ -705,17 +724,21 @@ export default function WerewolfApp() {
       }
       setSelectedTarget(null);
       await updateDoc(roomRef, updates);
-      return; // UI 會隨 room.status 變更自動解除鎖定
+      return; 
     }
     else if (actionType === 'knight_duel') {
       const target = room.players.find(p => p.id === selectedTarget);
       let updatedPlayers = [...room.players];
       let isTargetWolf = WOLF_ROLES.includes(target.role); 
       let sysLog = '';
+      let sealSkill = room.advancedSettings?.knightSealsSkill; // 讀取設定
       
       if (isTargetWolf) {
         updatedPlayers = updatedPlayers.map(p => p.id === target.id ? { ...p, isAlive: false } : p);
-        sysLog = `【騎士決鬥】騎士 ${me.name} 翻牌查驗了 ${target.name}，對方是狼人！${target.name} 遭到擊殺。`;
+        sysLog = `【騎士決鬥】騎士 ${me.name} 翻牌查驗了 ${target.name}，對方是狼人陣營！${target.name} 遭到擊殺。`;
+        if (target.role === '狼王' && sealSkill) {
+            sysLog += `(被動技能已被封印)`;
+        }
       } else {
         updatedPlayers = updatedPlayers.map(p => p.id === me.id ? { ...p, isAlive: false } : p);
         sysLog = `【騎士決鬥】騎士 ${me.name} 翻牌查驗了 ${target.name}，對方是好人！騎士 ${me.name} 判斷失誤，以死謝罪。`;
@@ -732,12 +755,14 @@ export default function WerewolfApp() {
          updates.winner = winner;
          updates.status = 'ended';
       } else if (isTargetWolf) {
-         if (target.role === '狼王') {
+         if (target.role === '狼王' && !sealSkill) {
+             // 狼王未被封印，可以開槍
              updates.status = 'hunter_shoot';
              updates.hunterTriggeredBy = 'knight';
              updates.currentSpeaker = target.id;
              updates.logs = arrayUnion({ type: 'sys', message: sysLog, time: Date.now() }, { type: 'sys', message: '等待狼王發動技能...', time: Date.now() + 1 });
          } else {
+             // 其他狼，或是被封印的狼王，直接進黑夜
              updates.status = 'night';
              updates.subPhase = getNextNightPhase('start', updatedPlayers);
              updates.nightActions = { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget };
@@ -752,11 +777,11 @@ export default function WerewolfApp() {
       }
       setSelectedTarget(null);
       await updateDoc(roomRef, updates);
-      return; // UI 會隨 room.status 變更自動解除鎖定
+      return; 
     }
 
     if (Object.keys(updates).length > 0) {
-      updateDoc(roomRef, updates).catch(console.error); // 樂觀背景更新
+      updateDoc(roomRef, updates).catch(console.error); 
     }
     setSelectedTarget(null);
     proceedToNextPhase({ ...room, nightActions: localNightActions });
@@ -781,17 +806,15 @@ export default function WerewolfApp() {
       if (room.currentSpeaker !== me.id) return alert('現在不是你的發言時間！');
     }
 
-    setChatInput(''); // 瞬間清空輸入框
+    setChatInput(''); 
     
     const msg = { id: Date.now().toString(), senderId: user.uid, senderName: me.name, text: textToSend, channel, time: Date.now() };
     
-    // 【樂觀更新】瞬間將訊息補上聊天室
     setRoom(prev => ({
       ...prev,
       chat: [...(prev.chat || []), msg]
     }));
     
-    // 背景發送至資料庫
     updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), { chat: arrayUnion(msg) }).catch(console.error);
   };
 
@@ -807,7 +830,6 @@ export default function WerewolfApp() {
     }
   };
 
-  // 若 Firebase 初始失敗顯示錯誤畫面
   if (initError) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-gray-900 text-red-400 p-4 text-center">
@@ -1011,7 +1033,7 @@ export default function WerewolfApp() {
                 ))}
               </div>
               
-              <div className="shrink-0 border-t border-amber-300 pt-3 mt-auto">
+              <div className="shrink-0 border-t border-amber-300 pt-3 mt-auto space-y-2">
                  <h4 className="font-bold text-sm mb-2 flex items-center text-amber-800"><CheckSquare size={16} className="mr-1"/> 主持人進階設定</h4>
                  <div className="flex items-center justify-between bg-white/60 p-2 rounded-lg border border-amber-200">
                     <span className="text-sm font-semibold text-gray-700">騎士可於投票階段決鬥</span>
@@ -1021,6 +1043,17 @@ export default function WerewolfApp() {
                       className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${room.advancedSettings?.knightCanDuelDuringVote ? 'bg-green-500' : 'bg-gray-300'} ${!isHost && 'opacity-50 cursor-not-allowed'}`}
                     >
                       <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${room.advancedSettings?.knightCanDuelDuringVote ? 'translate-x-6' : 'translate-x-1'}`} />
+                    </button>
+                 </div>
+                 {/* 【新增】騎士決鬥封印技能開關 */}
+                 <div className="flex items-center justify-between bg-white/60 p-2 rounded-lg border border-amber-200">
+                    <span className="text-sm font-semibold text-gray-700">騎士決鬥封印被動技能</span>
+                    <button 
+                      disabled={!isHost}
+                      onClick={() => toggleAdvancedSetting('knightSealsSkill')}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${room.advancedSettings?.knightSealsSkill ? 'bg-green-500' : 'bg-gray-300'} ${!isHost && 'opacity-50 cursor-not-allowed'}`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${room.advancedSettings?.knightSealsSkill ? 'translate-x-6' : 'translate-x-1'}`} />
                     </button>
                  </div>
               </div>
@@ -1045,7 +1078,7 @@ export default function WerewolfApp() {
                 </div>
               </div>
 
-              {/* 騎士專屬發動技能區塊 (判斷是否開啟進階設定) */}
+              {/* 騎士專屬發動技能區塊 */}
               {canUseKnightSkill && (
                 <div className={`p-4 rounded-xl shadow-lg border-2 mt-4 animate-[pulse_2s_ease-in-out_infinite] bg-amber-100 border-amber-500 text-amber-900`}>
                   <h4 className="font-bold text-center mb-2 flex items-center justify-center">
