@@ -136,6 +136,36 @@ export default function WerewolfApp() {
     }
   }, [room?.status]);
 
+  // 【新增】紀錄最新房間狀態的 Ref，確保 setTimeout 裡面抓到的是最新資料
+  const roomRefState = useRef(room);
+  useEffect(() => {
+    roomRefState.current = room;
+  }, [room]);
+
+  // 【新增】白癡翻牌動畫自動關閉計時器
+  useEffect(() => {
+    if (showIdiotReveal) {
+      const timer = setTimeout(async () => {
+        setShowIdiotReveal(false); // 關閉前端動畫
+        const currentRoom = roomRefState.current;
+        
+        // 只有主持人負責發送推進遊戲狀態的更新，避免重複觸發
+        if (currentRoom?.hostId === user?.uid && currentRoom.status === 'idiot_reveal') {
+          const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', currentRoom.id);
+          let updates = {
+              status: 'night',
+              nightActions: { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: currentRoom.nightActions?.lastGuardTarget || null },
+              subPhase: getNextNightPhase('start', currentRoom.players),
+              logs: arrayUnion({ type: 'sys', message: '天黑請閉眼...', time: Date.now() })
+          };
+          await updateDoc(docRef, updates);
+        }
+      }, 4500); // 設定 4.5 秒展示時間後自動關閉
+      
+      return () => clearTimeout(timer);
+    }
+  }, [showIdiotReveal, user?.uid]);
+
   const chatLength = room?.chat?.length || 0;
   const logsLength = room?.logs?.length || 0;
   useEffect(() => {
@@ -412,20 +442,6 @@ export default function WerewolfApp() {
 
     updates.logs = arrayUnion(...newLogs);
     await updateDoc(roomRef, updates);
-  };
-
-  const finishIdiotReveal = async () => {
-      setShowIdiotReveal(false);
-      if (room.hostId !== user.uid) return;
-      
-      const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id);
-      let updates = {
-          status: 'night',
-          nightActions: { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget || null },
-          subPhase: getNextNightPhase('start', room.players),
-          logs: arrayUnion({ type: 'sys', message: '天黑請閉眼...', time: Date.now() })
-      };
-      await updateDoc(roomRef, updates);
   };
 
   const resetGame = async () => {
@@ -853,12 +869,9 @@ export default function WerewolfApp() {
                  被最高票放逐，觸發【白癡】被動技能！<br/>
                  免除本次放逐死亡，但從此失去所有投票與被投票權利。
               </p>
-              <button 
-                 onClick={finishIdiotReveal}
-                 className="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-4 px-6 rounded-full text-lg shadow-lg transition-all active:scale-95"
-              >
-                 {isHost ? '確認並進入黑夜' : '等待主持人確認...'}
-              </button>
+              <div className="w-full bg-green-100 text-green-800 font-bold py-4 px-6 rounded-full text-lg shadow-inner border-2 border-green-300 animate-pulse">
+                 展示中... 即將自動進入黑夜
+              </div>
            </div>
         </div>
       )}
