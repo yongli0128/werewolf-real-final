@@ -8,7 +8,8 @@ import {
 } from 'firebase/firestore';
 import { 
   Moon, Sun, Users, Send, Info, Shield, Skull, Eye, MessageSquare, Play, 
-  LogOut, Vote, Plus, Minus, Mic, Target, HeartPulse, ShieldAlert
+  LogOut, Vote, Plus, Minus, Mic, Target, HeartPulse, ShieldAlert,
+  Sword, Crown, Snowflake, Frown
 } from 'lucide-react';
 
 // 👇👇👇 ⚠️ 如果在本地 VS Code 執行，請將下面這段換成你自己的 Firebase 金鑰 ⚠️ 👇👇👇
@@ -39,22 +40,31 @@ const shuffleArray = (array) => {
   return newArr;
 };
 
+// 陣營與身分定義
+const WOLF_ROLES = ['狼人', '狼王', '雪狼'];
+const GOD_ROLES = ['預言家', '女巫', '獵人', '守衛', '騎士', '白癡'];
+const VILLAGER_ROLES = ['村民'];
+
 const ROLES_INFO = {
   '狼人': { desc: '夜間可與同伴討論並殺害一名玩家。', color: 'text-red-500', icon: Skull },
+  '狼王': { desc: '死後可以開槍帶走一名玩家(被毒除外)。', color: 'text-red-700', icon: Crown },
+  '雪狼': { desc: '無法被預言家查出狼人身分，參與夜間擊殺。', color: 'text-blue-300', icon: Snowflake },
   '預言家': { desc: '夜間可查驗一名玩家的真實身分。', color: 'text-blue-500', icon: Eye },
   '女巫': { desc: '擁有一瓶解藥與一瓶毒藥。', color: 'text-purple-500', icon: HeartPulse },
   '獵人': { desc: '死後可以開槍帶走一名玩家。', color: 'text-orange-500', icon: Target },
   '守衛': { desc: '每晚可守護一名玩家免受狼害(不可連守)。', color: 'text-indigo-400', icon: ShieldAlert },
+  '騎士': { desc: '白天隨時可決鬥查驗一人，若為狼則狼死，否則自盡。', color: 'text-yellow-600', icon: Sword },
+  '白癡': { desc: '被投票出局可翻牌免死，但失去投票與被投票權。', color: 'text-green-800', icon: Frown },
   '村民': { desc: '沒有特殊技能，依靠推理找出狼人。', color: 'text-green-600', icon: Users },
   '未知': { desc: '等待分配...', color: 'text-gray-400', icon: Info }
 };
 
-const AVAILABLE_ROLES = ['狼人', '預言家', '女巫', '獵人', '守衛', '村民'];
+const AVAILABLE_ROLES = ['狼人', '狼王', '雪狼', '預言家', '女巫', '獵人', '守衛', '騎士', '白癡', '村民'];
 
 const NIGHT_PHASE_ORDER = ['guard', 'wolf', 'witch', 'seer', 'night_calc'];
 const PHASE_NAMES = {
   'guard': '守衛',
-  'wolf': '狼人',
+  'wolf': '狼人/狼王/雪狼',
   'witch': '女巫',
   'seer': '預言家'
 };
@@ -68,6 +78,10 @@ export default function WerewolfApp() {
   const [chatInput, setChatInput] = useState('');
   const [isCardFlipped, setIsCardFlipped] = useState(false);
   
+  // 【新增】身分揭曉動畫控制
+  const [showRoleModal, setShowRoleModal] = useState(false);
+  const prevStatusRef = useRef(null);
+
   const [seerResult, setSeerResult] = useState(null);
   const [selectedTarget, setSelectedTarget] = useState(null);
   const chatBottomRef = useRef(null);
@@ -108,19 +122,29 @@ export default function WerewolfApp() {
     return () => unsubscribe();
   }, [user, room?.id]);
 
+  // 【修正】防亂跳：只在訊息數量真實增加時，才將聊天室滾動到底部
+  const chatLength = room?.chat?.length || 0;
+  const logsLength = room?.logs?.length || 0;
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [room?.chat, room?.logs]);
+  }, [chatLength, logsLength]);
 
-  // 【新增】自動結算投票 (當所有存活玩家都投票時)
+  // 【新增】監聽遊戲開始，觸發身分揭曉動畫
+  useEffect(() => {
+    if (prevStatusRef.current === 'waiting' && room?.status === 'night') {
+      setShowRoleModal(true);
+      setIsCardFlipped(false); // 確保主畫面隱私牌預設蓋著
+    }
+    prevStatusRef.current = room?.status;
+  }, [room?.status]);
+
+  // 自動結算投票 (當所有存活且非翻牌白癡的玩家都投票時)
   useEffect(() => {
     if (room && room.status === 'day' && room.subPhase === 'discussing' && room.hostId === user?.uid) {
-      const alivePlayersCount = room.players.filter(p => p.isAlive).length;
+      const validVotersCount = room.players.filter(p => p.isAlive && !p.isIdiotRevealed).length;
       const currentVotesCount = Object.keys(room.votes || {}).length;
       
-      // 只要總票數等於存活人數，就觸發自動結算
-      if (alivePlayersCount > 0 && currentVotesCount === alivePlayersCount) {
-        // 延遲 1.5 秒，讓玩家能看一眼最終票型
+      if (validVotersCount > 0 && currentVotesCount === validVotersCount) {
         const timer = setTimeout(() => {
           performVoteCalculation(room);
         }, 1500);
@@ -139,12 +163,12 @@ export default function WerewolfApp() {
     let totalVillagers = 0;
 
     players.forEach(p => {
-      if (p.role === '狼人') {
+      if (WOLF_ROLES.includes(p.role)) {
         if (p.isAlive) aliveWolves++;
-      } else if (['預言家', '女巫', '獵人', '守衛'].includes(p.role)) {
+      } else if (GOD_ROLES.includes(p.role)) {
         totalGods++;
         if (p.isAlive) aliveGods++;
-      } else if (p.role === '村民') {
+      } else if (VILLAGER_ROLES.includes(p.role)) {
         totalVillagers++;
         if (p.isAlive) aliveVillagers++;
       }
@@ -163,7 +187,7 @@ export default function WerewolfApp() {
       idx++;
       const nextPhase = NIGHT_PHASE_ORDER[idx];
       if (nextPhase === 'guard' && players.some(p => p.role === '守衛' && p.isAlive)) return nextPhase;
-      if (nextPhase === 'wolf') return nextPhase; 
+      if (nextPhase === 'wolf' && players.some(p => WOLF_ROLES.includes(p.role) && p.isAlive)) return nextPhase; 
       if (nextPhase === 'witch' && players.some(p => p.role === '女巫' && p.isAlive)) return nextPhase;
       if (nextPhase === 'seer' && players.some(p => p.role === '預言家' && p.isAlive)) return nextPhase;
       if (nextPhase === 'night_calc') return nextPhase;
@@ -206,7 +230,7 @@ export default function WerewolfApp() {
       if (winner) {
         updates = { winner, status: 'ended' };
       } else {
-        if (currentRoom.hunterTriggeredBy === 'vote') {
+        if (currentRoom.hunterTriggeredBy === 'vote' || currentRoom.hunterTriggeredBy === 'knight') {
            updates = {
              status: 'night', subPhase: getNextNightPhase('start', currentRoom.players),
              votes: {}, nightActions: { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: currentRoom.nightActions?.lastGuardTarget || null },
@@ -246,14 +270,14 @@ export default function WerewolfApp() {
     if (wolfKillSuccess) deadIds.push(wolfTarget);
     if (witchPoison && !deadIds.includes(witchPoison)) deadIds.push(witchPoison);
 
-    let hunterCanShoot = false;
-    let hunterId = null;
+    let skillCanShoot = false;
+    let shooterId = null;
 
     updatedPlayers = updatedPlayers.map(p => {
       if (deadIds.includes(p.id)) {
-        if (p.role === '獵人') {
-          hunterId = p.id;
-          if (witchPoison !== p.id) hunterCanShoot = true; 
+        if (['獵人', '狼王'].includes(p.role)) {
+          shooterId = p.id;
+          if (witchPoison !== p.id) skillCanShoot = true; 
         }
         return { ...p, isAlive: false };
       }
@@ -273,11 +297,11 @@ export default function WerewolfApp() {
       'nightActions.lastGuardTarget': guardTarget || null
     };
 
-    if (hunterCanShoot) {
+    if (skillCanShoot) {
       updates.status = 'hunter_shoot';
       updates.hunterTriggeredBy = 'night';
-      updates.currentSpeaker = hunterId;
-      newLogs.push({ type: 'sys', message: '等待獵人發動技能...', time: Date.now() + 1 });
+      updates.currentSpeaker = shooterId;
+      newLogs.push({ type: 'sys', message: '等待技能(獵人/狼王)發動...', time: Date.now() + 1 });
     } else if (winner) {
       updates.winner = winner;
       updates.status = 'ended';
@@ -295,7 +319,6 @@ export default function WerewolfApp() {
   };
 
   const performVoteCalculation = async (currentRoom) => {
-    // 【修改】確保接收到的 currentRoom 狀態是最新的
     const targetRoom = currentRoom || room;
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', targetRoom.id);
     const voteCounts = {};
@@ -309,30 +332,36 @@ export default function WerewolfApp() {
 
     let updatedPlayers = [...targetRoom.players];
     let voteLog = '投票結果平局，沒有人被放逐。';
-    let isHunterExiled = false;
+    let skillCanShoot = false;
 
-    // 【新增】過半數放逐規則
-    const alivePlayersCount = updatedPlayers.filter(p => p.isAlive).length;
-    const requiredVotes = Math.floor(alivePlayersCount / 2); // 必須「大於」這個數字
+    const validVotersCount = updatedPlayers.filter(p => p.isAlive && !p.isIdiotRevealed).length;
+    const requiredVotes = Math.floor(validVotersCount / 2);
 
     if (exiledId === 'skip') {
       voteLog = '多數玩家選擇棄票，沒有人被放逐。';
       exiledId = null;
     } else if (exiledId) {
       if (maxVotes > requiredVotes) {
-        updatedPlayers = updatedPlayers.map(p => {
-          if (p.id === exiledId) {
-            if (p.role === '獵人') isHunterExiled = true;
-            return { ...p, isAlive: false };
-          }
-          return p;
-        });
         const exiledPlayer = targetRoom.players.find(p => p.id === exiledId);
-        voteLog = `投票結束，${exiledPlayer?.name} 獲得 ${maxVotes} 票被放逐了。`;
+        
+        if (exiledPlayer.role === '白癡' && !exiledPlayer.isIdiotRevealed) {
+          updatedPlayers = updatedPlayers.map(p => p.id === exiledId ? { ...p, isIdiotRevealed: true } : p);
+          voteLog = `投票結束，最高票 ${exiledPlayer?.name}(${maxVotes}票)。由於其身分為【白癡】，自動翻牌免死！但從此失去所有投票權。`;
+          exiledId = null; 
+        } else {
+          updatedPlayers = updatedPlayers.map(p => {
+            if (p.id === exiledId) {
+              if (['獵人', '狼王'].includes(p.role)) skillCanShoot = true;
+              return { ...p, isAlive: false };
+            }
+            return p;
+          });
+          voteLog = `投票結束，${exiledPlayer?.name} 獲得 ${maxVotes} 票被放逐了。`;
+        }
       } else {
         const targetPlayer = targetRoom.players.find(p => p.id === exiledId);
-        voteLog = `投票結束，最高票 ${targetPlayer?.name}(${maxVotes}票) 未達存活人數(${alivePlayersCount}人)半數，沒有人被放逐。`;
-        exiledId = null; // 取消放逐
+        voteLog = `投票結束，最高票 ${targetPlayer?.name}(${maxVotes}票) 未達半數(${requiredVotes+1}票)，沒有人被放逐。`;
+        exiledId = null; 
       }
     }
 
@@ -344,11 +373,11 @@ export default function WerewolfApp() {
       votes: {}
     };
 
-    if (isHunterExiled) {
+    if (skillCanShoot) {
       updates.status = 'hunter_shoot';
       updates.hunterTriggeredBy = 'vote';
       updates.currentSpeaker = exiledId;
-      newLogs.push({ type: 'sys', message: '等待獵人開槍...', time: Date.now() + 1 });
+      newLogs.push({ type: 'sys', message: '等待技能(獵人/狼王)開槍...', time: Date.now() + 1 });
     } else if (winner) {
       updates.winner = winner;
       updates.status = 'ended';
@@ -365,7 +394,7 @@ export default function WerewolfApp() {
 
   const resetGame = async () => {
     if (room.hostId !== user.uid) return;
-    const resetPlayers = room.players.map(p => ({ ...p, role: '未知', isAlive: true }));
+    const resetPlayers = room.players.map(p => ({ ...p, role: '未知', isAlive: true, isIdiotRevealed: false }));
     
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), {
       status: 'waiting',
@@ -376,6 +405,7 @@ export default function WerewolfApp() {
       votes: {},
       nightActions: { lastGuardTarget: null },
       witchState: { hasHeal: true, hasPoison: true },
+      knightUsed: false,
       winner: null,
       logs: arrayUnion({ type: 'sys', message: '主持人已重新啟動遊戲，請等待分配職業。', time: Date.now() })
     });
@@ -396,13 +426,14 @@ export default function WerewolfApp() {
       subPhase: '', 
       speakerQueue: [],
       currentSpeaker: null,
-      roleConfig: { '狼人': 3, '預言家': 1, '女巫': 1, '獵人': 1, '守衛': 1, '村民': 3 },
-      players: [{ id: user.uid, name: playerName, role: '未知', isAlive: true, avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${user.uid}` }],
+      roleConfig: { '狼人': 2, '狼王': 1, '預言家': 1, '女巫': 1, '獵人': 1, '守衛': 1, '騎士': 1, '白癡': 1, '村民': 3, '雪狼': 0 },
+      players: [{ id: user.uid, name: playerName, role: '未知', isAlive: true, isIdiotRevealed: false, avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${user.uid}` }],
       chat: [],
       logs: [{ type: 'system', message: `房間 ${code} 建立成功`, time: Date.now() }],
       votes: {},
       nightActions: { lastGuardTarget: null },
       witchState: { hasHeal: true, hasPoison: true },
+      knightUsed: false,
       winner: null
     };
     await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', code), newRoom);
@@ -419,7 +450,7 @@ export default function WerewolfApp() {
       if (roomData.status !== 'waiting') return alert('遊戲已開始，無法加入！');
       if (roomData.players.find(p => p.id === user.uid)) { setRoom(roomData); return; }
       await updateDoc(roomRef, {
-        players: arrayUnion({ id: user.uid, name: playerName, role: '未知', isAlive: true, avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${user.uid}` })
+        players: arrayUnion({ id: user.uid, name: playerName, role: '未知', isAlive: true, isIdiotRevealed: false, avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${user.uid}` })
       });
       setRoom(roomData);
     } else alert("找不到該房間");
@@ -444,7 +475,7 @@ export default function WerewolfApp() {
     });
     rolesPool = shuffleArray(rolesPool);
 
-    const updatedPlayers = room.players.map((p, index) => ({ ...p, role: rolesPool[index], isAlive: true }));
+    const updatedPlayers = room.players.map((p, index) => ({ ...p, role: rolesPool[index], isAlive: true, isIdiotRevealed: false }));
     const initialSubPhase = getNextNightPhase('start', updatedPlayers);
 
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), {
@@ -454,18 +485,20 @@ export default function WerewolfApp() {
       votes: {},
       nightActions: { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: null },
       witchState: { hasHeal: true, hasPoison: true },
+      knightUsed: false,
       winner: null,
       logs: arrayUnion(
         { type: 'sys', message: '遊戲開始！天黑請閉眼...', time: Date.now() },
         { type: 'sys', message: `系統：現在是 ${PHASE_NAMES[initialSubPhase]} 的回合`, time: Date.now() + 1 }
       )
     });
-    setIsCardFlipped(false);
   };
 
   const handlePlayerClick = async (targetId) => {
     const me = room.players.find(p => p.id === user.uid);
     const isHunterShooting = room.status === 'hunter_shoot' && me?.id === room.currentSpeaker;
+    const isKnightDuelling = room.status === 'day' && me?.role === '騎士' && !room.knightUsed;
+    
     if (!me || (!me.isAlive && !isHunterShooting)) return;
 
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id);
@@ -475,7 +508,7 @@ export default function WerewolfApp() {
         if (targetId === room.nightActions?.lastGuardTarget) return alert('不能連續兩晚守護同一名玩家！');
         setSelectedTarget(targetId);
       }
-      else if (room.subPhase === 'wolf' && me.role === '狼人') {
+      else if (room.subPhase === 'wolf' && WOLF_ROLES.includes(me.role)) {
         await updateDoc(roomRef, { [`nightActions.sharedWolfTarget`]: targetId });
       } 
       else if (room.subPhase === 'witch' && me.role === '女巫') {
@@ -485,10 +518,10 @@ export default function WerewolfApp() {
         setSelectedTarget(targetId);
       }
     } 
-    else if (room.status === 'day' && room.subPhase === 'discussing') {
+    else if (room.status === 'day' && room.subPhase === 'discussing' && !me.isIdiotRevealed) {
       await updateDoc(roomRef, { [`votes.${user.uid}`]: targetId });
     }
-    else if (isHunterShooting) {
+    else if (isHunterShooting || isKnightDuelling) {
       setSelectedTarget(targetId);
     }
   };
@@ -497,7 +530,6 @@ export default function WerewolfApp() {
     const me = room.players.find(p => p.id === user.uid);
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id);
     let updates = {};
-    
     let localNightActions = { ...(room.nightActions || {}) };
 
     if (actionType === 'pass') {
@@ -527,7 +559,7 @@ export default function WerewolfApp() {
     }
     else if (room.subPhase === 'seer' && actionType === 'check') {
       const target = room.players.find(p => p.id === selectedTarget);
-      const isBad = target.role === '狼人';
+      const isBad = target.role === '狼人' || target.role === '狼王';
       setSeerResult(`${target.name} 的身分是：${isBad ? '🐺 狼人' : '🧑‍🌾 好人'}`);
       updates['nightActions.seerChecked'] = true;
       await updateDoc(roomRef, updates);
@@ -535,7 +567,7 @@ export default function WerewolfApp() {
     }
     else if (room.status === 'hunter_shoot' && actionType === 'shoot') {
       const target = room.players.find(p => p.id === selectedTarget);
-      updates.logs = arrayUnion({ type: 'sys', message: `獵人開槍帶走了 ${target.name}！`, time: Date.now() });
+      updates.logs = arrayUnion({ type: 'sys', message: `${me.role} 開槍帶走了 ${target.name}！`, time: Date.now() });
       
       let updatedPlayers = room.players.map(p => p.id === selectedTarget ? { ...p, isAlive: false } : p);
       updates.players = updatedPlayers;
@@ -544,7 +576,7 @@ export default function WerewolfApp() {
       if (winner) {
         updates.winner = winner; updates.status = 'ended';
       } else {
-        if (room.hunterTriggeredBy === 'vote') {
+        if (room.hunterTriggeredBy === 'vote' || room.hunterTriggeredBy === 'knight') {
            updates.status = 'night'; 
            updates.subPhase = getNextNightPhase('start', updatedPlayers);
            updates.nightActions = { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget };
@@ -553,6 +585,53 @@ export default function WerewolfApp() {
            updates.status = 'day'; updates.subPhase = 'speaking';
            updates.speakerQueue = aliveIds; updates.currentSpeaker = aliveIds[0] || null;
         }
+      }
+      setSelectedTarget(null);
+      await updateDoc(roomRef, updates);
+      return;
+    }
+    else if (actionType === 'knight_duel') {
+      const target = room.players.find(p => p.id === selectedTarget);
+      let updatedPlayers = [...room.players];
+      let isTargetWolf = WOLF_ROLES.includes(target.role); 
+      let sysLog = '';
+      
+      if (isTargetWolf) {
+        updatedPlayers = updatedPlayers.map(p => p.id === target.id ? { ...p, isAlive: false } : p);
+        sysLog = `【騎士決鬥】騎士 ${me.name} 翻牌查驗了 ${target.name}，對方是狼人！${target.name} 遭到擊殺。`;
+      } else {
+        updatedPlayers = updatedPlayers.map(p => p.id === me.id ? { ...p, isAlive: false } : p);
+        sysLog = `【騎士決鬥】騎士 ${me.name} 翻牌查驗了 ${target.name}，對方是好人！騎士 ${me.name} 判斷失誤，以死謝罪。`;
+      }
+
+      const winner = checkWinCondition(updatedPlayers, room.roleConfig);
+      updates = { 
+          players: updatedPlayers, 
+          knightUsed: true,
+          logs: arrayUnion({ type: 'sys', message: sysLog, time: Date.now() }) 
+      };
+
+      if (winner) {
+         updates.winner = winner;
+         updates.status = 'ended';
+      } else if (isTargetWolf) {
+         if (target.role === '狼王') {
+             updates.status = 'hunter_shoot';
+             updates.hunterTriggeredBy = 'knight';
+             updates.currentSpeaker = target.id;
+             updates.logs = arrayUnion({ type: 'sys', message: sysLog, time: Date.now() }, { type: 'sys', message: '等待狼王發動技能...', time: Date.now() + 1 });
+         } else {
+             updates.status = 'night';
+             updates.subPhase = getNextNightPhase('start', updatedPlayers);
+             updates.nightActions = { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget };
+         }
+      } else {
+         let newQueue = room.speakerQueue.filter(id => id !== me.id);
+         updates.speakerQueue = newQueue;
+         if (room.currentSpeaker === me.id) {
+             updates.currentSpeaker = newQueue.length > 0 ? newQueue[0] : null;
+             if (newQueue.length === 0) updates.subPhase = 'discussing';
+         }
       }
       setSelectedTarget(null);
       await updateDoc(roomRef, updates);
@@ -576,11 +655,11 @@ export default function WerewolfApp() {
     
     if (!me.isAlive) channel = 'ghost'; 
     else if (room.status === 'night') {
-      if (me.role === '狼人') {
+      if (WOLF_ROLES.includes(me.role)) {
         if (room.subPhase !== 'wolf') return alert('狼人只能在刀人階段交流！');
         channel = 'wolf';
       }
-      else return alert('黑夜期間只有狼人可以發言！');
+      else return alert('黑夜期間只有狼人陣營可以發言！');
     } else if (room.status === 'day' && room.subPhase === 'speaking') {
       if (room.currentSpeaker !== me.id) return alert('現在不是你的發言時間！');
     }
@@ -592,7 +671,6 @@ export default function WerewolfApp() {
 
   const hostForceNext = async () => {
     if (room.status === 'day' && room.subPhase === 'discussing') {
-      // 主持人依舊可以手動強制結算（若有人一直不投票）
       await performVoteCalculation(room);
     } else if (room.status === 'night' && room.subPhase === 'night_calc') {
       await performNightCalculation(room);
@@ -610,10 +688,11 @@ export default function WerewolfApp() {
   const RoleIcon = me ? ROLES_INFO[me.role]?.icon || Info : Info;
   
   const isHunterShooting = room?.status === 'hunter_shoot' && me?.id === room?.currentSpeaker;
-  const isVotingPhase = room?.status === 'day' && room?.subPhase === 'discussing' && me?.isAlive;
+  const isVotingPhase = room?.status === 'day' && room?.subPhase === 'discussing' && me?.isAlive && !me?.isIdiotRevealed;
+  const canUseKnightSkill = me?.role === '騎士' && me?.isAlive && room?.status === 'day' && !room?.knightUsed;
 
   const myTurn = (room?.status === 'night' && room?.subPhase === 'guard' && me?.role === '守衛' && me?.isAlive) ||
-                 (room?.status === 'night' && room?.subPhase === 'wolf' && me?.role === '狼人' && me?.isAlive) ||
+                 (room?.status === 'night' && room?.subPhase === 'wolf' && WOLF_ROLES.includes(me?.role) && me?.isAlive) ||
                  (room?.status === 'night' && room?.subPhase === 'witch' && me?.role === '女巫' && me?.isAlive) ||
                  (room?.status === 'night' && room?.subPhase === 'seer' && me?.role === '預言家' && me?.isAlive) ||
                  (room?.status === 'day' && room?.subPhase === 'speaking' && room?.currentSpeaker === me?.id) ||
@@ -628,7 +707,7 @@ export default function WerewolfApp() {
           <div className="text-center mb-8">
             <Moon className="w-16 h-16 mx-auto text-purple-500 mb-4 animate-pulse" />
             <h1 className="text-3xl font-bold tracking-wider">血月狼人殺</h1>
-            <p className="text-gray-400 mt-2 text-sm">全自動法官機制版 (屠邊局)</p>
+            <p className="text-gray-400 mt-2 text-sm">全自動法官版 (新增: 狼王/雪狼/騎士/白癡)</p>
           </div>
           <div className="space-y-4">
             <div>
@@ -651,22 +730,48 @@ export default function WerewolfApp() {
 
   return (
     <div className={`min-h-screen transition-colors duration-1000 ease-in-out font-sans ${themeClasses} pb-20 md:pb-0`}>
-      <style>{`.perspective-1000 { perspective: 1000px; } .transform-style-3d { transform-style: preserve-3d; } .backface-hidden { backface-visibility: hidden; } .rotate-y-180 { transform: rotateY(180deg); }`}</style>
+      <style>{`
+        .perspective-1000 { perspective: 1000px; } 
+        .transform-style-3d { transform-style: preserve-3d; } 
+        .backface-hidden { backface-visibility: hidden; } 
+        .rotate-y-180 { transform: rotateY(180deg); }
+        @keyframes scaleIn { from { transform: scale(0.5); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+      `}</style>
+
+      {/* 身分揭曉動畫 Modal */}
+      {showRoleModal && me && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/95 backdrop-blur-sm transition-opacity">
+          <div className="bg-slate-800 p-8 rounded-3xl shadow-[0_0_50px_rgba(168,85,247,0.3)] border-4 border-purple-500 text-center max-w-sm w-[90%] transform transition-all animate-[scaleIn_0.4s_ease-out]">
+            <h2 className="text-gray-300 text-xl mb-4 font-bold tracking-widest">你的真實身分是...</h2>
+            <div className="flex justify-center mb-6">
+              {React.createElement(ROLES_INFO[me.role].icon, { size: 90, className: `${ROLES_INFO[me.role].color} animate-[pulse_2s_ease-in-out_infinite]` })}
+            </div>
+            <h1 className={`text-5xl font-black mb-4 ${ROLES_INFO[me.role].color}`}>{me.role}</h1>
+            <p className="text-gray-300 mb-8 leading-relaxed font-semibold">{ROLES_INFO[me.role].desc}</p>
+            <button 
+              onClick={() => setShowRoleModal(false)}
+              className="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-4 px-6 rounded-full text-lg shadow-[0_0_20px_rgba(147,51,234,0.6)] transition-all active:scale-95"
+            >
+              確認身分，進入黑夜
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 勝利結算動畫 Overlay */}
       {room.winner && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm transition-opacity">
-          <div className="text-center">
-            <h1 className={`animate-[bounce_2s_ease-in-out_infinite] text-6xl md:text-8xl font-black mb-8 drop-shadow-[0_0_20px_rgba(255,255,255,0.5)] ${room.winner === 'good' ? 'text-blue-400' : 'text-red-500'}`}>
+          <div className="text-center p-4">
+            <h1 className={`animate-[bounce_2s_ease-in-out_infinite] text-5xl md:text-8xl font-black mb-8 drop-shadow-[0_0_20px_rgba(255,255,255,0.5)] ${room.winner === 'good' ? 'text-blue-400' : 'text-red-500'}`}>
               {room.winner === 'good' ? '好人陣營 勝利！' : '狼人陣營 勝利！'}
             </h1>
-            <div className="space-y-4 md:space-y-0 md:space-x-4">
+            <div className="flex flex-col space-y-4 md:flex-row md:space-y-0 md:space-x-4 justify-center items-center">
               {isHost ? (
-                <button onClick={resetGame} className="w-full md:w-auto bg-blue-600 hover:bg-blue-500 text-white px-8 py-3 rounded-full font-bold">再來一局</button>
+                <button onClick={resetGame} className="w-full md:w-auto bg-blue-600 hover:bg-blue-500 text-white px-8 py-3 rounded-full font-bold shadow-lg">再來一局</button>
               ) : (
-                <p className="text-white text-xl mb-4">等待主持人重新啟動遊戲...</p>
+                <p className="text-white text-xl mb-4 font-bold">等待主持人重新啟動遊戲...</p>
               )}
-              <button onClick={leaveRoom} className="w-full md:w-auto bg-gray-700 hover:bg-gray-600 text-white px-8 py-3 rounded-full font-bold">離開房間</button>
+              <button onClick={leaveRoom} className="w-full md:w-auto bg-gray-700 hover:bg-gray-600 text-white px-8 py-3 rounded-full font-bold shadow-lg">離開房間</button>
             </div>
           </div>
         </div>
@@ -683,7 +788,7 @@ export default function WerewolfApp() {
                 room.status === 'waiting' ? '等待玩家...' :
                 room.status === 'night' ? `🌙 黑夜 (${PHASE_NAMES[room.subPhase] || '結算'}回合)` :
                 room.subPhase === 'speaking' ? '🗣️ 輪流發言' : 
-                room.status === 'hunter_shoot' ? '🎯 獵人開槍' : '⚖️ 自由討論/投票'
+                room.status === 'hunter_shoot' ? '🎯 技能發動中' : '⚖️ 自由討論/投票'
               }
             </p>
           </div>
@@ -691,7 +796,7 @@ export default function WerewolfApp() {
         <div className="flex items-center space-x-4">
           <div className="text-right hidden sm:block">
             <p className="font-bold">{me?.name}</p>
-            <p className={`text-xs ${me?.isAlive ? 'text-green-500' : 'text-red-400'}`}>{me?.isAlive ? '存活' : '已淘汰 (靈魂)'}</p>
+            <p className={`text-xs font-bold ${me?.isAlive ? 'text-green-500' : 'text-red-400'}`}>{me?.isAlive ? '存活' : '已淘汰 (靈魂)'}</p>
           </div>
           <button onClick={leaveRoom} className="p-2 rounded-full hover:bg-black/10 transition"><LogOut size={20} /></button>
         </div>
@@ -702,18 +807,18 @@ export default function WerewolfApp() {
         {/* Left Column: Actions & Players */}
         <div className="space-y-6 md:col-span-1">
           
-          {/* Waiting Phase: Role Config */}
+          {/* 【優化】Waiting Phase: 雙排網格 Role Config (手機不亂跳) */}
           {room.status === 'waiting' && (
             <div className="bg-white/50 rounded-xl p-4 shadow-lg border-2 border-amber-500">
               <h3 className="font-bold mb-3 flex items-center text-[#3e2723]"><Shield size={18} className="mr-2"/> 職業設定 (目前: {room.players.length}人)</h3>
-              <div className="space-y-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {AVAILABLE_ROLES.map(role => (
-                  <div key={role} className="flex justify-between items-center bg-white/60 p-2 rounded">
-                    <span className="font-semibold text-sm text-[#3e2723]">{role}</span>
-                    <div className="flex items-center space-x-3">
-                      {isHost && <button onClick={()=>updateRoleConfig(role, -1)} className="p-1 bg-red-100 text-red-600 rounded hover:bg-red-200"><Minus size={14}/></button>}
-                      <span className="font-bold w-4 text-center text-[#3e2723]">{room.roleConfig?.[role] || 0}</span>
-                      {isHost && <button onClick={()=>updateRoleConfig(role, 1)} className="p-1 bg-green-100 text-green-600 rounded hover:bg-green-200"><Plus size={14}/></button>}
+                  <div key={role} className="flex justify-between items-center bg-white/70 p-2 rounded-lg shadow-sm border border-gray-200">
+                    <span className={`font-bold text-sm ${ROLES_INFO[role].color}`}>{role}</span>
+                    <div className="flex items-center space-x-1">
+                      {isHost && <button onClick={()=>updateRoleConfig(role, -1)} className="p-1.5 bg-red-100 text-red-600 rounded-md hover:bg-red-200 active:bg-red-300"><Minus size={16}/></button>}
+                      <span className="font-bold w-5 text-center text-gray-800">{room.roleConfig?.[role] || 0}</span>
+                      {isHost && <button onClick={()=>updateRoleConfig(role, 1)} className="p-1.5 bg-green-100 text-green-600 rounded-md hover:bg-green-200 active:bg-green-300"><Plus size={16}/></button>}
                     </div>
                   </div>
                 ))}
@@ -731,11 +836,30 @@ export default function WerewolfApp() {
                     <p className="font-bold text-sm tracking-wider">點擊翻開身分卡</p>
                   </div>
                   <div className={`absolute w-full h-full backface-hidden rotate-y-180 rounded-xl shadow-md p-4 border-2 flex flex-col items-center justify-center text-center ${isNight ? 'bg-slate-900 border-purple-500' : 'bg-white border-[#8b5a2b]'}`}>
-                    <h3 className={`text-xl font-bold mb-1 ${ROLES_INFO[me?.role]?.color}`}>{me?.role}</h3>
-                    <p className="text-xs opacity-80">{ROLES_INFO[me?.role]?.desc}</p>
+                    <h3 className={`text-2xl font-black mb-1 ${ROLES_INFO[me?.role]?.color}`}>
+                      {me?.role} {me?.isIdiotRevealed && '(已翻牌)'}
+                    </h3>
+                    <p className="text-xs font-semibold opacity-80">{ROLES_INFO[me?.role]?.desc}</p>
                   </div>
                 </div>
               </div>
+
+              {/* 騎士專屬發動技能區塊 (在白天任何時候都能發動) */}
+              {canUseKnightSkill && (
+                <div className={`p-4 rounded-xl shadow-lg border-2 mt-4 animate-[pulse_2s_ease-in-out_infinite] bg-amber-100 border-amber-500 text-amber-900`}>
+                  <h4 className="font-bold text-center mb-2 flex items-center justify-center">
+                    <Sword size={16} className="mr-2"/> 騎士專屬技能
+                  </h4>
+                  <p className="text-xs text-center mb-3 font-bold opacity-80">點選目標後點擊按鈕進行決鬥 (整局限用一次)</p>
+                  <button 
+                    onClick={()=>confirmAction('knight_duel')} 
+                    disabled={!selectedTarget} 
+                    className="w-full bg-amber-600 hover:bg-amber-500 text-white py-2 rounded-lg disabled:opacity-50 font-bold shadow-md transition"
+                  >
+                    {selectedTarget ? '對選中玩家發動決鬥！' : '請先點選玩家頭像'}
+                  </button>
+                </div>
+              )}
 
               {/* Action Panel based on turn */}
               {myTurn && (
@@ -748,16 +872,16 @@ export default function WerewolfApp() {
                   {/* Guard Action */}
                   {room.subPhase === 'guard' && (
                     <div className="flex gap-2">
-                      <button onClick={()=>confirmAction('guard')} disabled={!selectedTarget} className="flex-1 bg-indigo-600 text-white py-2 rounded disabled:opacity-50">確認守護</button>
-                      <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded">不守 (過)</button>
+                      <button onClick={()=>confirmAction('guard')} disabled={!selectedTarget} className="flex-1 bg-indigo-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">確認守護</button>
+                      <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded-lg font-bold">不守 (過)</button>
                     </div>
                   )}
 
                   {/* Wolf Action */}
                   {room.subPhase === 'wolf' && (
                     <div className="flex gap-2">
-                      <button onClick={()=>confirmAction('wolf_confirm')} disabled={!room.nightActions?.sharedWolfTarget} className="flex-1 bg-red-600 text-white py-2 rounded disabled:opacity-50">確認擊殺</button>
-                      <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded">不殺 (過)</button>
+                      <button onClick={()=>confirmAction('wolf_confirm')} disabled={!room.nightActions?.sharedWolfTarget} className="flex-1 bg-red-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">確認擊殺</button>
+                      <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded-lg font-bold">不殺 (過)</button>
                     </div>
                   )}
 
@@ -766,10 +890,10 @@ export default function WerewolfApp() {
                     <div className="space-y-2 text-sm">
                       <p className="text-center font-bold text-red-300">昨晚狼人刀了：{room.players.find(p=>p.id === room.nightActions?.wolfTarget)?.name || '沒人'}</p>
                       <div className="flex gap-2">
-                        <button onClick={()=>confirmAction('heal')} disabled={!room.witchState?.hasHeal || !room.nightActions?.wolfTarget} className="flex-1 bg-green-600 text-white py-2 rounded disabled:opacity-50">用解藥</button>
-                        <button onClick={()=>confirmAction('poison')} disabled={!room.witchState?.hasPoison || !selectedTarget} className="flex-1 bg-purple-600 text-white py-2 rounded disabled:opacity-50">用毒藥</button>
+                        <button onClick={()=>confirmAction('heal')} disabled={!room.witchState?.hasHeal || !room.nightActions?.wolfTarget} className="flex-1 bg-green-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">用解藥</button>
+                        <button onClick={()=>confirmAction('poison')} disabled={!room.witchState?.hasPoison || !selectedTarget} className="flex-1 bg-purple-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">用毒藥</button>
                       </div>
-                      <button onClick={()=>confirmAction('pass')} className="w-full bg-gray-600 text-white py-2 rounded">什麼都不做 (過)</button>
+                      <button onClick={()=>confirmAction('pass')} className="w-full bg-gray-600 text-white py-2 rounded-lg font-bold">什麼都不做 (過)</button>
                     </div>
                   )}
 
@@ -778,13 +902,13 @@ export default function WerewolfApp() {
                     <div className="space-y-2 text-sm">
                        {seerResult ? (
                          <>
-                           <div className="bg-blue-900 p-2 rounded text-center text-blue-200 font-bold">{seerResult}</div>
-                           <button onClick={()=>confirmAction('pass')} className="w-full bg-gray-600 text-white py-2 rounded">確認 (過)</button>
+                           <div className="bg-blue-900 p-3 rounded-lg text-center text-blue-200 text-lg font-bold">{seerResult}</div>
+                           <button onClick={()=>confirmAction('pass')} className="w-full bg-gray-600 text-white py-2 rounded-lg font-bold">確認 (過)</button>
                          </>
                        ) : (
                          <div className="flex gap-2">
-                           <button onClick={()=>confirmAction('check')} disabled={!selectedTarget} className="flex-1 bg-blue-600 text-white py-2 rounded disabled:opacity-50">確認查驗</button>
-                           <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded">不驗 (過)</button>
+                           <button onClick={()=>confirmAction('check')} disabled={!selectedTarget} className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">確認查驗</button>
+                           <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded-lg font-bold">不驗 (過)</button>
                          </div>
                        )}
                     </div>
@@ -792,7 +916,7 @@ export default function WerewolfApp() {
 
                   {/* Speaking Action */}
                   {room.subPhase === 'speaking' && (
-                    <button onClick={() => proceedToNextPhase()} className="w-full bg-green-600 text-white py-2 rounded font-bold">結束發言 (過)</button>
+                    <button onClick={() => proceedToNextPhase()} className="w-full bg-green-600 hover:bg-green-500 text-white py-3 rounded-lg font-bold shadow-md transition-all">結束發言 (過)</button>
                   )}
 
                   {/* Discussing / Voting Action (含棄票按鈕) */}
@@ -801,21 +925,23 @@ export default function WerewolfApp() {
                       <p className="text-center font-bold mb-2 text-amber-900">請點擊玩家頭像投票，或選擇棄票</p>
                       <button 
                         onClick={() => handlePlayerClick('skip')} 
-                        className={`w-full py-2 rounded font-bold transition-all ${room.votes?.[user.uid] === 'skip' ? 'bg-amber-600 text-white shadow-lg ring-2 ring-amber-300' : 'bg-gray-600 text-gray-200 hover:bg-gray-500'}`}
+                        className={`w-full py-3 rounded-lg font-bold transition-all shadow-md ${room.votes?.[user.uid] === 'skip' ? 'bg-amber-600 text-white ring-4 ring-amber-300' : 'bg-gray-600 text-gray-200 hover:bg-gray-500'}`}
                       >
                         {room.votes?.[user.uid] === 'skip' ? '✔️ 已選擇：棄票' : '我要棄票'}
                       </button>
-                      <div className="flex justify-center mt-2">
-                         <span className="text-xs opacity-80 text-amber-900 font-bold">目前已投票人數: {Object.keys(room.votes || {}).length} / {room.players.filter(p=>p.isAlive).length}</span>
+                      <div className="flex justify-center mt-2 bg-amber-100/50 p-2 rounded">
+                         <span className="text-xs font-bold text-amber-900">
+                           投票進度: {Object.keys(room.votes || {}).length} / {room.players.filter(p=>p.isAlive && !p.isIdiotRevealed).length}
+                         </span>
                       </div>
                     </div>
                   )}
 
-                  {/* Hunter Action */}
+                  {/* Hunter/Wolf King Action */}
                   {room.status === 'hunter_shoot' && (
                     <div className="flex gap-2">
-                      <button onClick={()=>confirmAction('shoot')} disabled={!selectedTarget} className="flex-1 bg-orange-600 text-white py-2 rounded disabled:opacity-50">開槍帶走</button>
-                      <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded">不開槍 (過)</button>
+                      <button onClick={()=>confirmAction('shoot')} disabled={!selectedTarget} className="flex-1 bg-orange-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">開槍帶走</button>
+                      <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded-lg font-bold">不開槍 (過)</button>
                     </div>
                   )}
                 </div>
@@ -832,8 +958,8 @@ export default function WerewolfApp() {
               {room.players.map(p => {
                 const isSpeaking = (room.status === 'day' && room.subPhase === 'speaking' && room.currentSpeaker === p.id) || (room.status === 'hunter_shoot' && room.currentSpeaker === p.id);
                 
-                const isFinalWolfTarget = room.status === 'night' && me?.role === '狼人' && room.nightActions?.wolfTarget === p.id;
-                const isSharedWolfTarget = room.status === 'night' && room.subPhase === 'wolf' && me?.role === '狼人' && room.nightActions?.sharedWolfTarget === p.id;
+                const isFinalWolfTarget = room.status === 'night' && WOLF_ROLES.includes(me?.role) && room.nightActions?.wolfTarget === p.id;
+                const isSharedWolfTarget = room.status === 'night' && room.subPhase === 'wolf' && WOLF_ROLES.includes(me?.role) && room.nightActions?.sharedWolfTarget === p.id;
                 const wolfTargetUI = isFinalWolfTarget || isSharedWolfTarget;
                 
                 const isDayTargeted = room.votes?.[user.uid] === p.id;
@@ -845,10 +971,14 @@ export default function WerewolfApp() {
                 else if (wolfTargetUI) borderClass = 'border-red-500 bg-red-500/20 shadow-[0_0_15px_rgba(239,68,68,0.5)]';
                 else if (isDayTargeted) borderClass = 'border-amber-500 bg-amber-500/20';
 
+                // 白天投票時，翻牌的白癡不能被投票
+                const isIdiotUnvotable = isVotingPhase && p.isIdiotRevealed;
+
                 const canInteract = (me?.isAlive || isHunterShooting) && p.isAlive && (
-                  (room.status === 'day' && room.subPhase === 'discussing') || 
+                  (isVotingPhase && !isIdiotUnvotable) || 
                   (myTurn && ['guard', 'witch', 'seer', 'wolf'].includes(room.subPhase)) ||
-                  isHunterShooting
+                  isHunterShooting ||
+                  canUseKnightSkill
                 );
 
                 return (
@@ -857,6 +987,7 @@ export default function WerewolfApp() {
                     className={`relative flex items-center p-2 rounded-lg border-2 transition-all ${!p.isAlive ? 'opacity-40 grayscale border-transparent' : canInteract ? `${borderClass} hover:border-gray-400 cursor-pointer` : borderClass}`}
                   >
                     {isSpeaking && <Mic className="absolute -top-2 -right-2 text-green-500 animate-bounce bg-white rounded-full p-0.5" size={20} />}
+                    {p.isIdiotRevealed && p.isAlive && <Frown className="absolute -top-2 -left-2 text-green-700 bg-white rounded-full p-0.5 shadow-md" size={18} />}
                     <img src={p.avatar} alt="avatar" className="w-10 h-10 rounded-full mr-2 bg-black/10" />
                     <div className="truncate w-full">
                       <p className={`font-semibold text-sm ${!p.isAlive && 'line-through'}`}>{p.name}</p>
@@ -875,9 +1006,9 @@ export default function WerewolfApp() {
             <div className={`rounded-xl p-3 shadow-sm border-2 border-dashed ${isNight ? 'bg-slate-900 border-slate-700' : 'bg-amber-100/50 border-amber-300'}`}>
               <h3 className="font-bold text-xs mb-2 opacity-60 flex items-center"><Play size={12} className="mr-1"/> 主持人工具</h3>
               {room.status === 'waiting' ? (
-                <button onClick={startGame} className="w-full bg-green-600 hover:bg-green-700 text-white py-2 rounded font-bold transition">開始遊戲</button>
+                <button onClick={startGame} className="w-full bg-green-600 hover:bg-green-500 text-white py-3 rounded-lg font-bold transition shadow-md">開始遊戲 (派發身分)</button>
               ) : (
-                <button onClick={hostForceNext} className="w-full bg-gray-600 text-white py-1 rounded text-sm transition">
+                <button onClick={hostForceNext} className="w-full bg-gray-600 text-white py-2 rounded-lg text-sm font-bold transition">
                   {room.status === 'day' && room.subPhase === 'discussing' ? '強制結算投票' : '強制推進階段 (防卡死)'}
                 </button>
               )}
@@ -890,19 +1021,20 @@ export default function WerewolfApp() {
           <div className="flex-grow overflow-y-auto p-4 space-y-3">
             {room.logs.map((log, i) => (
               <div key={`log-${i}`} className="flex justify-center my-2 animate-[fadeIn_0.5s_ease-in-out]">
-                <span className={`px-4 py-1 rounded-full text-xs font-bold shadow-sm ${log.type === 'sys' ? (isNight ? 'bg-purple-900/80 text-purple-200' : 'bg-amber-500/30 text-amber-900') : 'bg-gray-500/20 text-gray-400'}`}>
+                <span className={`px-4 py-1.5 rounded-full text-xs font-bold shadow-sm ${log.type === 'sys' ? (isNight ? 'bg-purple-900/80 text-purple-200' : 'bg-amber-500/30 text-amber-900') : 'bg-gray-500/20 text-gray-400'}`}>
                   {log.message}
                 </span>
               </div>
             ))}
             {room.chat.map(msg => {
-              if (msg.channel === 'wolf' && (!me || (me.role !== '狼人' && me.id !== msg.senderId))) return null;
+              // 狼隊專用頻道 (狼人、狼王、雪狼 皆可看見)
+              if (msg.channel === 'wolf' && (!me || (!WOLF_ROLES.includes(me.role) && me.id !== msg.senderId))) return null;
               if (msg.channel === 'ghost' && me?.isAlive) return null;
               const isMe = msg.senderId === user.uid;
               return (
                 <div key={msg.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[75%] rounded-2xl px-4 py-2 shadow-sm ${msg.channel === 'wolf' ? 'bg-red-900 text-red-100 border border-red-700' : msg.channel === 'ghost' ? 'bg-gray-700 text-gray-300 border border-gray-600' : isMe ? (isNight ? 'bg-purple-700 text-white' : 'bg-[#8b5a2b] text-white') : (isNight ? 'bg-slate-700 text-gray-200' : 'bg-[#f4e4bc] text-[#3e2723]')}`}>
-                    {!isMe && <p className="text-[10px] opacity-70 mb-1 font-bold">{msg.senderName} {msg.channel==='wolf' && '(狼人)'}</p>}
+                    {!isMe && <p className="text-[10px] opacity-70 mb-1 font-bold">{msg.senderName} {msg.channel==='wolf' && '(狼伴)'}</p>}
                     <p className="text-sm">{msg.text}</p>
                   </div>
                 </div>
@@ -915,11 +1047,11 @@ export default function WerewolfApp() {
           <div className={`p-3 border-t ${isNight ? 'border-slate-700 bg-slate-900 rounded-b-xl' : 'border-[#dcd0b8] bg-[#fdf6e3] rounded-b-xl'}`}>
             <form onSubmit={sendMessage} className="flex space-x-2">
               <input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)}
-                placeholder={!me?.isAlive ? "在靈魂頻道發言..." : room.status === 'night' ? (me?.role === '狼人' && room.subPhase === 'wolf' ? "與狼伴密謀..." : "黑夜降臨，請保持安靜...") : room.subPhase === 'speaking' ? (room.currentSpeaker === me.id ? "現在是你的發言時間！" : "請聽別人發言...") : "自由討論時間..."}
-                disabled={me?.isAlive && ((room.status === 'night' && (me?.role !== '狼人' || room.subPhase !== 'wolf')) || (room.status === 'day' && room.subPhase === 'speaking' && room.currentSpeaker !== me?.id))}
+                placeholder={!me?.isAlive ? "在靈魂頻道發言..." : room.status === 'night' ? (WOLF_ROLES.includes(me?.role) && room.subPhase === 'wolf' ? "與狼伴密謀..." : "黑夜降臨，請保持安靜...") : room.subPhase === 'speaking' ? (room.currentSpeaker === me.id ? "現在是你的發言時間！" : "請聽別人發言...") : "自由討論時間..."}
+                disabled={me?.isAlive && ((room.status === 'night' && (!WOLF_ROLES.includes(me?.role) || room.subPhase !== 'wolf')) || (room.status === 'day' && room.subPhase === 'speaking' && room.currentSpeaker !== me?.id))}
                 className={`flex-grow px-4 py-2 rounded-full focus:outline-none focus:ring-2 disabled:opacity-50 ${isNight ? 'bg-slate-800 border-slate-700 text-white focus:ring-purple-500 placeholder-slate-500' : 'bg-white border-[#dcd0b8] focus:ring-[#8b5a2b]'} border`}
               />
-              <button type="submit" disabled={me?.isAlive && ((room.status === 'night' && (me?.role !== '狼人' || room.subPhase !== 'wolf')) || (room.status === 'day' && room.subPhase === 'speaking' && room.currentSpeaker !== me?.id))}
+              <button type="submit" disabled={me?.isAlive && ((room.status === 'night' && (!WOLF_ROLES.includes(me?.role) || room.subPhase !== 'wolf')) || (room.status === 'day' && room.subPhase === 'speaking' && room.currentSpeaker !== me?.id))}
                 className={`p-2 rounded-full flex items-center justify-center transition disabled:opacity-50 ${isNight ? 'bg-purple-600 hover:bg-purple-700 text-white disabled:bg-slate-700' : 'bg-[#8b5a2b] hover:bg-[#6c4622] text-white disabled:bg-gray-300'}`}
               ><Send size={20} /></button>
             </form>
