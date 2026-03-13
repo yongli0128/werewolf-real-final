@@ -82,6 +82,9 @@ export default function WerewolfApp() {
   const [isCardFlipped, setIsCardFlipped] = useState(false);
   const [initError, setInitError] = useState(null);
   
+  // 【新增】防連點與網路延遲的 Loading 狀態
+  const [isProcessing, setIsProcessing] = useState(false);
+
   const [showRoleModal, setShowRoleModal] = useState(false);
   const prevStatusRef = useRef(null);
 
@@ -136,20 +139,22 @@ export default function WerewolfApp() {
     }
   }, [room?.status]);
 
-  // 【新增】紀錄最新房間狀態的 Ref，確保 setTimeout 裡面抓到的是最新資料
+  // 【新增】每當遊戲階段推進成功，自動解除按鈕的 Loading 鎖定
+  useEffect(() => {
+    setIsProcessing(false);
+  }, [room?.subPhase, room?.status, room?.currentSpeaker, room?.nightActions?.seerChecked, room?.knightUsed]);
+
   const roomRefState = useRef(room);
   useEffect(() => {
     roomRefState.current = room;
   }, [room]);
 
-  // 【新增】白癡翻牌動畫自動關閉計時器
   useEffect(() => {
     if (showIdiotReveal) {
       const timer = setTimeout(async () => {
-        setShowIdiotReveal(false); // 關閉前端動畫
+        setShowIdiotReveal(false);
         const currentRoom = roomRefState.current;
         
-        // 只有主持人負責發送推進遊戲狀態的更新，避免重複觸發
         if (currentRoom?.hostId === user?.uid && currentRoom.status === 'idiot_reveal') {
           const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', currentRoom.id);
           let updates = {
@@ -160,7 +165,7 @@ export default function WerewolfApp() {
           };
           await updateDoc(docRef, updates);
         }
-      }, 4500); // 設定 4.5 秒展示時間後自動關閉
+      }, 4500); 
       
       return () => clearTimeout(timer);
     }
@@ -286,7 +291,7 @@ export default function WerewolfApp() {
     }
 
     if (Object.keys(updates).length > 0) {
-      await updateDoc(roomRef, updates);
+      updateDoc(roomRef, updates).catch(console.error); // 優化：背景執行不阻擋
     }
   };
 
@@ -445,7 +450,8 @@ export default function WerewolfApp() {
   };
 
   const resetGame = async () => {
-    if (room.hostId !== user.uid) return;
+    if (room.hostId !== user.uid || isProcessing) return;
+    setIsProcessing(true);
     const resetPlayers = room.players.map(p => ({ ...p, role: '未知', isAlive: true, isIdiotRevealed: false }));
     
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), {
@@ -461,6 +467,7 @@ export default function WerewolfApp() {
       winner: null,
       logs: arrayUnion({ type: 'sys', message: '主持人已重新啟動遊戲，請等待分配職業。', time: Date.now() })
     });
+    setIsProcessing(false);
   };
 
   const handleNameChange = (e) => {
@@ -469,7 +476,8 @@ export default function WerewolfApp() {
   };
 
   const createRoom = async () => {
-    if (!playerName.trim() || !user) return;
+    if (!playerName.trim() || !user || isProcessing) return;
+    setIsProcessing(true);
     const code = generateRoomCode();
     const newRoom = {
       id: code,
@@ -491,22 +499,31 @@ export default function WerewolfApp() {
     };
     await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', code), newRoom);
     setRoom(newRoom);
+    setIsProcessing(false);
   };
 
   const joinRoom = async () => {
-    if (!playerName.trim() || !user || !roomIdInput.trim()) return;
+    if (!playerName.trim() || !user || !roomIdInput.trim() || isProcessing) return;
+    setIsProcessing(true);
     const code = roomIdInput.trim().toUpperCase();
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', code);
     const snapshot = await getDoc(roomRef);
     if (snapshot.exists()) {
       const roomData = snapshot.data();
-      if (roomData.status !== 'waiting') return alert('遊戲已開始，無法加入！');
-      if (roomData.players.find(p => p.id === user.uid)) { setRoom(roomData); return; }
-      await updateDoc(roomRef, {
-        players: arrayUnion({ id: user.uid, name: playerName, role: '未知', isAlive: true, isIdiotRevealed: false, avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${user.uid}` })
-      });
-      setRoom(roomData);
-    } else alert("找不到該房間");
+      if (roomData.status !== 'waiting') {
+        alert('遊戲已開始，無法加入！');
+      } else if (roomData.players.find(p => p.id === user.uid)) { 
+        setRoom(roomData); 
+      } else {
+        await updateDoc(roomRef, {
+          players: arrayUnion({ id: user.uid, name: playerName, role: '未知', isAlive: true, isIdiotRevealed: false, avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${user.uid}` })
+        });
+        setRoom(roomData);
+      }
+    } else {
+      alert("找不到該房間");
+    }
+    setIsProcessing(false);
   };
 
   const leaveRoom = () => { setRoom(null); setIsCardFlipped(false); };
@@ -515,19 +532,34 @@ export default function WerewolfApp() {
     if (room.hostId !== user.uid || room.status !== 'waiting') return;
     const currentCount = room.roleConfig[role] || 0;
     const newCount = Math.max(0, currentCount + delta);
-    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), { [`roleConfig.${role}`]: newCount });
+    
+    // 【樂觀更新 Optimistic UI】瞬間切換數字，提升手感
+    setRoom(prev => ({
+       ...prev,
+       roleConfig: { ...prev.roleConfig, [role]: newCount }
+    }));
+    updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), { [`roleConfig.${role}`]: newCount }).catch(console.error);
   };
   
   const toggleAdvancedSetting = async (settingKey) => {
     if (room.hostId !== user.uid || room.status !== 'waiting') return;
-    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), { 
-        [`advancedSettings.${settingKey}`]: !room.advancedSettings?.[settingKey] 
-    });
+    const newValue = !room.advancedSettings?.[settingKey];
+    
+    // 【樂觀更新】瞬間切換開關
+    setRoom(prev => ({
+       ...prev,
+       advancedSettings: { ...prev.advancedSettings, [settingKey]: newValue }
+    }));
+    updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), { 
+        [`advancedSettings.${settingKey}`]: newValue 
+    }).catch(console.error);
   };
 
   const startGame = async () => {
     const totalRoles = Object.values(room.roleConfig).reduce((a, b) => a + b, 0);
     if (totalRoles !== room.players.length) return alert(`設定的職業總數 (${totalRoles}) 必須等於玩家人數 (${room.players.length})`);
+    if (isProcessing) return;
+    setIsProcessing(true);
     
     let rolesPool = [];
     Object.entries(room.roleConfig).forEach(([role, count]) => {
@@ -561,7 +593,7 @@ export default function WerewolfApp() {
     const canDuelNow = room.status === 'day' && (!room.advancedSettings?.knightCanDuelDuringVote ? room.subPhase !== 'discussing' : true);
     const isKnightDuelling = canDuelNow && me?.role === '騎士' && !room.knightUsed;
     
-    if (!me || (!me.isAlive && !isHunterShooting)) return;
+    if (!me || (!me.isAlive && !isHunterShooting) || isProcessing) return;
 
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id);
     
@@ -571,7 +603,12 @@ export default function WerewolfApp() {
         setSelectedTarget(targetId);
       }
       else if (room.subPhase === 'wolf' && WOLF_ROLES.includes(me.role)) {
-        await updateDoc(roomRef, { [`nightActions.sharedWolfTarget`]: targetId });
+        // 【樂觀更新】點選狼人目標瞬間亮起，不卡頓
+        setRoom(prev => ({
+          ...prev,
+          nightActions: { ...(prev.nightActions || {}), sharedWolfTarget: targetId }
+        }));
+        updateDoc(roomRef, { [`nightActions.sharedWolfTarget`]: targetId }).catch(console.error);
       } 
       else if (room.subPhase === 'witch' && me.role === '女巫') {
         setSelectedTarget(targetId);
@@ -581,7 +618,13 @@ export default function WerewolfApp() {
       }
     } 
     else if (room.status === 'day' && room.subPhase === 'discussing' && !me.isIdiotRevealed) {
-      await updateDoc(roomRef, { [`votes.${user.uid}`]: targetId });
+      // 【樂觀更新】點擊投票瞬間完成
+      setRoom(prev => ({
+        ...prev,
+        votes: { ...(prev.votes || {}), [user.uid]: targetId }
+      }));
+      updateDoc(roomRef, { [`votes.${user.uid}`]: targetId }).catch(console.error);
+      
       if (isKnightDuelling && targetId !== 'skip') {
         setSelectedTarget(targetId);
       }
@@ -592,6 +635,9 @@ export default function WerewolfApp() {
   };
 
   const confirmAction = async (actionType) => {
+    if (isProcessing) return;
+    setIsProcessing(true); // 鎖定按鈕，防止連點
+
     const me = room.players.find(p => p.id === user.uid);
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id);
     let updates = {};
@@ -599,7 +645,7 @@ export default function WerewolfApp() {
 
     if (actionType === 'pass') {
       setSelectedTarget(null);
-      return proceedToNextPhase();
+      return proceedToNextPhase(); // 內部會有自己的非同步處理
     }
 
     if (room.subPhase === 'guard' && actionType === 'guard') {
@@ -612,7 +658,11 @@ export default function WerewolfApp() {
     }
     else if (room.subPhase === 'witch') {
       if (actionType === 'heal') {
-        if (room.nightActions?.wolfTarget === me.id) return alert('女巫不可自救！');
+        if (room.nightActions?.wolfTarget === me.id) {
+          alert('女巫不可自救！');
+          setIsProcessing(false);
+          return;
+        }
         updates['nightActions.witchHeal'] = true;
         updates['witchState.hasHeal'] = false;
         localNightActions.witchHeal = true;
@@ -628,6 +678,8 @@ export default function WerewolfApp() {
       setSeerResult(`${target.name} 的身分是：${isBad ? '🐺 狼人' : '🧑‍🌾 好人'}`);
       updates['nightActions.seerChecked'] = true;
       await updateDoc(roomRef, updates);
+      // 這裡不解開 isProcessing，讓它在點擊「確認 (過)」時處理
+      setIsProcessing(false);
       return; 
     }
     else if (room.status === 'hunter_shoot' && actionType === 'shoot') {
@@ -653,7 +705,7 @@ export default function WerewolfApp() {
       }
       setSelectedTarget(null);
       await updateDoc(roomRef, updates);
-      return;
+      return; // UI 會隨 room.status 變更自動解除鎖定
     }
     else if (actionType === 'knight_duel') {
       const target = room.players.find(p => p.id === selectedTarget);
@@ -700,11 +752,11 @@ export default function WerewolfApp() {
       }
       setSelectedTarget(null);
       await updateDoc(roomRef, updates);
-      return;
+      return; // UI 會隨 room.status 變更自動解除鎖定
     }
 
     if (Object.keys(updates).length > 0) {
-      await updateDoc(roomRef, updates);
+      updateDoc(roomRef, updates).catch(console.error); // 樂觀背景更新
     }
     setSelectedTarget(null);
     proceedToNextPhase({ ...room, nightActions: localNightActions });
@@ -729,12 +781,23 @@ export default function WerewolfApp() {
       if (room.currentSpeaker !== me.id) return alert('現在不是你的發言時間！');
     }
 
-    setChatInput('');
+    setChatInput(''); // 瞬間清空輸入框
+    
     const msg = { id: Date.now().toString(), senderId: user.uid, senderName: me.name, text: textToSend, channel, time: Date.now() };
-    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), { chat: arrayUnion(msg) });
+    
+    // 【樂觀更新】瞬間將訊息補上聊天室
+    setRoom(prev => ({
+      ...prev,
+      chat: [...(prev.chat || []), msg]
+    }));
+    
+    // 背景發送至資料庫
+    updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), { chat: arrayUnion(msg) }).catch(console.error);
   };
 
   const hostForceNext = async () => {
+    if (isProcessing) return;
+    setIsProcessing(true);
     if (room.status === 'day' && room.subPhase === 'discussing') {
       await performVoteCalculation(room);
     } else if (room.status === 'night' && room.subPhase === 'night_calc') {
@@ -786,32 +849,35 @@ export default function WerewolfApp() {
           <div className="text-center mb-8">
             <Moon className="w-16 h-16 mx-auto text-purple-500 mb-4 animate-pulse" />
             <h1 className="text-3xl font-bold tracking-wider">血月狼人殺</h1>
-            <p className="text-gray-400 mt-2 text-sm">全自動法官版 (新增: 狼王/雪狼/騎士/白癡)</p>
+            <p className="text-gray-400 mt-2 text-sm">全自動法官版 (流暢優化版)</p>
           </div>
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-400 mb-1">你的暱稱</label>
-              <input type="text" value={playerName} onChange={handleNameChange} className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-purple-500" placeholder="輸入玩家名稱"/>
+              <input type="text" value={playerName} onChange={handleNameChange} disabled={isProcessing} className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50" placeholder="輸入玩家名稱"/>
             </div>
-            <button onClick={createRoom} className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200">建立新房間</button>
+            <button onClick={createRoom} disabled={isProcessing} className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200 disabled:opacity-50">
+              {isProcessing ? '建立中...' : '建立新房間'}
+            </button>
             <div className="relative flex items-center py-2">
               <div className="flex-grow border-t border-gray-600"></div><span className="flex-shrink-0 mx-4 text-gray-500 text-sm">或</span><div className="flex-grow border-t border-gray-600"></div>
             </div>
-            {/* 【優化】完美解決手機版加入按鈕被擠壓的問題 */}
             <div className="flex space-x-3">
               <input 
                 type="text" 
                 value={roomIdInput} 
                 onChange={(e) => setRoomIdInput(e.target.value)} 
-                className="w-full flex-1 min-w-0 bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 uppercase" 
+                disabled={isProcessing}
+                className="w-full flex-1 min-w-0 bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 uppercase disabled:opacity-50" 
                 placeholder="輸入房間代碼" 
                 maxLength={4}
               />
               <button 
                 onClick={joinRoom} 
-                className="shrink-0 whitespace-nowrap bg-gray-600 hover:bg-gray-500 text-white font-bold py-3 px-6 rounded-lg transition duration-200"
+                disabled={isProcessing}
+                className="shrink-0 whitespace-nowrap bg-gray-600 hover:bg-gray-500 text-white font-bold py-3 px-6 rounded-lg transition duration-200 disabled:opacity-50"
               >
-                加入
+                {isProcessing ? '...' : '加入'}
               </button>
             </div>
           </div>
@@ -885,7 +951,9 @@ export default function WerewolfApp() {
             </h1>
             <div className="flex flex-col space-y-4 md:flex-row md:space-y-0 md:space-x-4 justify-center items-center">
               {isHost ? (
-                <button onClick={resetGame} className="w-full md:w-auto bg-blue-600 hover:bg-blue-500 text-white px-8 py-3 rounded-full font-bold shadow-lg">再來一局</button>
+                <button onClick={resetGame} disabled={isProcessing} className="w-full md:w-auto bg-blue-600 hover:bg-blue-500 text-white px-8 py-3 rounded-full font-bold shadow-lg disabled:opacity-50">
+                  {isProcessing ? '處理中...' : '再來一局'}
+                </button>
               ) : (
                 <p className="text-white text-xl mb-4 font-bold">等待主持人重新啟動遊戲...</p>
               )}
@@ -986,10 +1054,10 @@ export default function WerewolfApp() {
                   <p className="text-xs text-center mb-3 font-bold opacity-80">點選目標後點擊按鈕進行決鬥 (整局限用一次)</p>
                   <button 
                     onClick={()=>confirmAction('knight_duel')} 
-                    disabled={!selectedTarget} 
+                    disabled={!selectedTarget || isProcessing} 
                     className="w-full bg-amber-600 hover:bg-amber-500 text-white py-2 rounded-lg disabled:opacity-50 font-bold shadow-md transition"
                   >
-                    {selectedTarget ? '對選中玩家發動決鬥！' : '請先點選玩家頭像'}
+                    {isProcessing ? '發動中...' : (selectedTarget ? '對選中玩家發動決鬥！' : '請先點選玩家頭像')}
                   </button>
                 </div>
               )}
@@ -1005,16 +1073,24 @@ export default function WerewolfApp() {
                   {/* Guard Action */}
                   {room.subPhase === 'guard' && (
                     <div className="flex gap-2">
-                      <button onClick={()=>confirmAction('guard')} disabled={!selectedTarget} className="flex-1 bg-indigo-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">確認守護</button>
-                      <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded-lg font-bold">不守 (過)</button>
+                      <button onClick={()=>confirmAction('guard')} disabled={!selectedTarget || isProcessing} className="flex-1 bg-indigo-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">
+                        {isProcessing ? '...' : '確認守護'}
+                      </button>
+                      <button onClick={()=>confirmAction('pass')} disabled={isProcessing} className="flex-1 bg-gray-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">
+                        {isProcessing ? '...' : '不守 (跳過)'}
+                      </button>
                     </div>
                   )}
 
                   {/* Wolf Action */}
                   {room.subPhase === 'wolf' && (
                     <div className="flex gap-2">
-                      <button onClick={()=>confirmAction('wolf_confirm')} disabled={!room.nightActions?.sharedWolfTarget} className="flex-1 bg-red-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">確認擊殺</button>
-                      <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded-lg font-bold">不殺 (過)</button>
+                      <button onClick={()=>confirmAction('wolf_confirm')} disabled={!room.nightActions?.sharedWolfTarget || isProcessing} className="flex-1 bg-red-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">
+                        {isProcessing ? '...' : '確認擊殺'}
+                      </button>
+                      <button onClick={()=>confirmAction('pass')} disabled={isProcessing} className="flex-1 bg-gray-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">
+                        {isProcessing ? '...' : '不殺 (跳過)'}
+                      </button>
                     </div>
                   )}
 
@@ -1023,10 +1099,16 @@ export default function WerewolfApp() {
                     <div className="space-y-2 text-sm">
                       <p className="text-center font-bold text-red-300">昨晚狼人刀了：{room.players.find(p=>p.id === room.nightActions?.wolfTarget)?.name || '沒人'}</p>
                       <div className="flex gap-2">
-                        <button onClick={()=>confirmAction('heal')} disabled={!room.witchState?.hasHeal || !room.nightActions?.wolfTarget} className="flex-1 bg-green-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">用解藥</button>
-                        <button onClick={()=>confirmAction('poison')} disabled={!room.witchState?.hasPoison || !selectedTarget} className="flex-1 bg-purple-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">用毒藥</button>
+                        <button onClick={()=>confirmAction('heal')} disabled={!room.witchState?.hasHeal || !room.nightActions?.wolfTarget || isProcessing} className="flex-1 bg-green-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">
+                          {isProcessing ? '...' : '用解藥'}
+                        </button>
+                        <button onClick={()=>confirmAction('poison')} disabled={!room.witchState?.hasPoison || !selectedTarget || isProcessing} className="flex-1 bg-purple-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">
+                          {isProcessing ? '...' : '用毒藥'}
+                        </button>
                       </div>
-                      <button onClick={()=>confirmAction('pass')} className="w-full bg-gray-600 text-white py-2 rounded-lg font-bold">什麼都不做 (過)</button>
+                      <button onClick={()=>confirmAction('pass')} disabled={isProcessing} className="w-full bg-gray-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">
+                        {isProcessing ? '處理中...' : '什麼都不做 (跳過)'}
+                      </button>
                     </div>
                   )}
 
@@ -1036,12 +1118,18 @@ export default function WerewolfApp() {
                        {seerResult ? (
                          <>
                            <div className="bg-blue-900 p-3 rounded-lg text-center text-blue-200 text-lg font-bold">{seerResult}</div>
-                           <button onClick={()=>confirmAction('pass')} className="w-full bg-gray-600 text-white py-2 rounded-lg font-bold">確認 (過)</button>
+                           <button onClick={()=>confirmAction('pass')} disabled={isProcessing} className="w-full bg-gray-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">
+                             {isProcessing ? '處理中...' : '確認 (跳過)'}
+                           </button>
                          </>
                        ) : (
                          <div className="flex gap-2">
-                           <button onClick={()=>confirmAction('check')} disabled={!selectedTarget} className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">確認查驗</button>
-                           <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded-lg font-bold">不驗 (過)</button>
+                           <button onClick={()=>confirmAction('check')} disabled={!selectedTarget || isProcessing} className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">
+                             {isProcessing ? '...' : '確認查驗'}
+                           </button>
+                           <button onClick={()=>confirmAction('pass')} disabled={isProcessing} className="flex-1 bg-gray-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">
+                             {isProcessing ? '...' : '不驗 (跳過)'}
+                           </button>
                          </div>
                        )}
                     </div>
@@ -1049,7 +1137,9 @@ export default function WerewolfApp() {
 
                   {/* Speaking Action */}
                   {room.subPhase === 'speaking' && (
-                    <button onClick={() => proceedToNextPhase()} className="w-full bg-green-600 hover:bg-green-500 text-white py-3 rounded-lg font-bold shadow-md transition-all">結束發言 (過)</button>
+                    <button onClick={()=>confirmAction('pass')} disabled={isProcessing} className="w-full bg-green-600 hover:bg-green-500 text-white py-3 rounded-lg font-bold shadow-md transition-all disabled:opacity-50">
+                      {isProcessing ? '處理中...' : '結束發言 (跳過)'}
+                    </button>
                   )}
 
                   {/* Discussing / Voting Action (含棄票按鈕) */}
@@ -1058,7 +1148,8 @@ export default function WerewolfApp() {
                       <p className="text-center font-bold mb-2 text-amber-900">請點擊玩家頭像投票，或選擇棄票</p>
                       <button 
                         onClick={() => handlePlayerClick('skip')} 
-                        className={`w-full py-3 rounded-lg font-bold transition-all shadow-md ${room.votes?.[user.uid] === 'skip' ? 'bg-amber-600 text-white ring-4 ring-amber-300' : 'bg-gray-600 text-gray-200 hover:bg-gray-500'}`}
+                        disabled={isProcessing}
+                        className={`w-full py-3 rounded-lg font-bold transition-all shadow-md disabled:opacity-50 ${room.votes?.[user.uid] === 'skip' ? 'bg-amber-600 text-white ring-4 ring-amber-300' : 'bg-gray-600 text-gray-200 hover:bg-gray-500'}`}
                       >
                         {room.votes?.[user.uid] === 'skip' ? '✔️ 已選擇：棄票' : '我要棄票'}
                       </button>
@@ -1073,8 +1164,12 @@ export default function WerewolfApp() {
                   {/* Hunter/Wolf King Action */}
                   {room.status === 'hunter_shoot' && (
                     <div className="flex gap-2">
-                      <button onClick={()=>confirmAction('shoot')} disabled={!selectedTarget} className="flex-1 bg-orange-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">開槍帶走</button>
-                      <button onClick={()=>confirmAction('pass')} className="flex-1 bg-gray-600 text-white py-2 rounded-lg font-bold">不開槍 (過)</button>
+                      <button onClick={()=>confirmAction('shoot')} disabled={!selectedTarget || isProcessing} className="flex-1 bg-orange-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">
+                        {isProcessing ? '...' : '開槍帶走'}
+                      </button>
+                      <button onClick={()=>confirmAction('pass')} disabled={isProcessing} className="flex-1 bg-gray-600 text-white py-2 rounded-lg font-bold disabled:opacity-50">
+                        {isProcessing ? '...' : '不開槍 (跳過)'}
+                      </button>
                     </div>
                   )}
                 </div>
@@ -1116,7 +1211,7 @@ export default function WerewolfApp() {
 
                 return (
                   <div 
-                    key={p.id} onClick={() => canInteract && handlePlayerClick(p.id)}
+                    key={p.id} onClick={() => !isProcessing && canInteract && handlePlayerClick(p.id)}
                     className={`relative flex items-center p-2 rounded-lg border-2 transition-all ${!p.isAlive ? 'opacity-40 grayscale border-transparent' : canInteract ? `${borderClass} hover:border-gray-400 cursor-pointer` : borderClass}`}
                   >
                     {isSpeaking && <Mic className="absolute -top-2 -right-2 text-green-500 animate-bounce bg-white rounded-full p-0.5" size={20} />}
@@ -1139,10 +1234,12 @@ export default function WerewolfApp() {
             <div className={`rounded-xl p-3 shadow-sm border-2 border-dashed ${isNight ? 'bg-slate-900 border-slate-700' : 'bg-amber-100/50 border-amber-300'}`}>
               <h3 className="font-bold text-xs mb-2 opacity-60 flex items-center"><Play size={12} className="mr-1"/> 主持人工具</h3>
               {room.status === 'waiting' ? (
-                <button onClick={startGame} className="w-full bg-green-600 hover:bg-green-500 text-white py-3 rounded-lg font-bold transition shadow-md">開始遊戲 (派發身分)</button>
+                <button onClick={startGame} disabled={isProcessing} className="w-full bg-green-600 hover:bg-green-500 text-white py-3 rounded-lg font-bold transition shadow-md disabled:opacity-50">
+                  {isProcessing ? '派發中...' : '開始遊戲 (派發身分)'}
+                </button>
               ) : (
-                <button onClick={hostForceNext} className="w-full bg-gray-600 text-white py-2 rounded-lg text-sm font-bold transition">
-                  {room.status === 'day' && room.subPhase === 'discussing' ? '強制結算投票' : '強制推進階段 (防卡死)'}
+                <button onClick={hostForceNext} disabled={isProcessing} className="w-full bg-gray-600 text-white py-2 rounded-lg text-sm font-bold transition disabled:opacity-50">
+                  {isProcessing ? '處理中...' : (room.status === 'day' && room.subPhase === 'discussing' ? '強制結算投票' : '強制推進階段 (防卡死)')}
                 </button>
               )}
             </div>
