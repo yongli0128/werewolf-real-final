@@ -9,7 +9,7 @@ import {
 import { 
   Moon, Sun, Users, Send, Info, Shield, Skull, Eye, MessageSquare, Play, 
   LogOut, Vote, Plus, Minus, Mic, Target, HeartPulse, ShieldAlert,
-  Sword, Crown, Snowflake, Frown
+  Sword, Crown, Snowflake, Frown, CheckSquare
 } from 'lucide-react';
 
 // 👇👇👇 ⚠️ 如果在本地 VS Code 執行，請將下面這段換成你自己的 Firebase 金鑰 ⚠️ 👇👇👇
@@ -78,13 +78,16 @@ export default function WerewolfApp() {
   const [chatInput, setChatInput] = useState('');
   const [isCardFlipped, setIsCardFlipped] = useState(false);
   
-  // 【新增】身分揭曉動畫控制
   const [showRoleModal, setShowRoleModal] = useState(false);
   const prevStatusRef = useRef(null);
 
   const [seerResult, setSeerResult] = useState(null);
   const [selectedTarget, setSelectedTarget] = useState(null);
   const chatBottomRef = useRef(null);
+
+  // 用於控制白癡翻牌動畫的本地狀態
+  const [showIdiotReveal, setShowIdiotReveal] = useState(false);
+  const [idiotRevealData, setIdiotRevealData] = useState(null);
 
   useEffect(() => {
     const initAuth = async () => {
@@ -110,9 +113,11 @@ export default function WerewolfApp() {
       if (snapshot.exists()) {
         const data = snapshot.data();
         setRoom(data);
-        if (data.status !== 'night') {
-          setSeerResult(null);
-          setSelectedTarget(null);
+        
+        // 檢查是否需要顯示白癡翻牌動畫
+        if (data.status === 'idiot_reveal' && !showIdiotReveal) {
+          setIdiotRevealData(data.idiotRevealInfo);
+          setShowIdiotReveal(true);
         }
       } else {
         setRoom(null);
@@ -120,25 +125,29 @@ export default function WerewolfApp() {
       }
     });
     return () => unsubscribe();
-  }, [user, room?.id]);
+  }, [user, room?.id, showIdiotReveal]);
 
-  // 【修正】防亂跳：只在訊息數量真實增加時，才將聊天室滾動到底部
+  // 獨立處理特定狀態清理，避免打字或投票時清空 selectedTarget
+  useEffect(() => {
+    if (room?.status === 'day') {
+      setSeerResult(null);
+    }
+  }, [room?.status]);
+
   const chatLength = room?.chat?.length || 0;
   const logsLength = room?.logs?.length || 0;
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatLength, logsLength]);
 
-  // 【新增】監聽遊戲開始，觸發身分揭曉動畫
   useEffect(() => {
     if (prevStatusRef.current === 'waiting' && room?.status === 'night') {
       setShowRoleModal(true);
-      setIsCardFlipped(false); // 確保主畫面隱私牌預設蓋著
+      setIsCardFlipped(false); 
     }
     prevStatusRef.current = room?.status;
   }, [room?.status]);
 
-  // 自動結算投票 (當所有存活且非翻牌白癡的玩家都投票時)
   useEffect(() => {
     if (room && room.status === 'day' && room.subPhase === 'discussing' && room.hostId === user?.uid) {
       const validVotersCount = room.players.filter(p => p.isAlive && !p.isIdiotRevealed).length;
@@ -153,7 +162,6 @@ export default function WerewolfApp() {
     }
   }, [room?.votes, room?.status, room?.subPhase, room?.hostId, user?.uid]);
 
-  // 智慧屠邊偵測引擎
   const checkWinCondition = (players, roleConfig) => {
     let aliveWolves = 0;
     let aliveGods = 0;
@@ -333,6 +341,8 @@ export default function WerewolfApp() {
     let updatedPlayers = [...targetRoom.players];
     let voteLog = '投票結果平局，沒有人被放逐。';
     let skillCanShoot = false;
+    let triggerIdiotReveal = false;
+    let idiotPlayerInfo = null;
 
     const validVotersCount = updatedPlayers.filter(p => p.isAlive && !p.isIdiotRevealed).length;
     const requiredVotes = Math.floor(validVotersCount / 2);
@@ -346,7 +356,9 @@ export default function WerewolfApp() {
         
         if (exiledPlayer.role === '白癡' && !exiledPlayer.isIdiotRevealed) {
           updatedPlayers = updatedPlayers.map(p => p.id === exiledId ? { ...p, isIdiotRevealed: true } : p);
-          voteLog = `投票結束，最高票 ${exiledPlayer?.name}(${maxVotes}票)。由於其身分為【白癡】，自動翻牌免死！但從此失去所有投票權。`;
+          voteLog = `投票結束，最高票 ${exiledPlayer?.name}(${maxVotes}票)。`; // 後續會由動畫補充
+          triggerIdiotReveal = true;
+          idiotPlayerInfo = { id: exiledPlayer.id, name: exiledPlayer.name };
           exiledId = null; 
         } else {
           updatedPlayers = updatedPlayers.map(p => {
@@ -373,6 +385,15 @@ export default function WerewolfApp() {
       votes: {}
     };
 
+    // 處理白癡翻牌動畫過渡狀態
+    if (triggerIdiotReveal) {
+        updates.status = 'idiot_reveal';
+        updates.idiotRevealInfo = idiotPlayerInfo;
+        updates.logs = arrayUnion(...newLogs, { type: 'sys', message: `系統：${idiotPlayerInfo.name} 翻牌為【白癡】，免除放逐並失去投票權！`, time: Date.now() + 1 });
+        await updateDoc(roomRef, updates);
+        return; // 中斷後續結算，等待動畫結束
+    }
+
     if (skillCanShoot) {
       updates.status = 'hunter_shoot';
       updates.hunterTriggeredBy = 'vote';
@@ -390,6 +411,25 @@ export default function WerewolfApp() {
 
     updates.logs = arrayUnion(...newLogs);
     await updateDoc(roomRef, updates);
+  };
+
+  // 結束白癡翻牌動畫並繼續遊戲
+  const finishIdiotReveal = async () => {
+      setShowIdiotReveal(false);
+      // 只有主持人負責推進狀態，避免多人同時點擊
+      if (room.hostId !== user.uid) return;
+      
+      const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id);
+      
+      // 翻牌後直接進入黑夜
+      let updates = {
+          status: 'night',
+          nightActions: { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget || null },
+          subPhase: getNextNightPhase('start', room.players),
+          logs: arrayUnion({ type: 'sys', message: '天黑請閉眼...', time: Date.now() })
+      };
+      
+      await updateDoc(roomRef, updates);
   };
 
   const resetGame = async () => {
@@ -427,6 +467,7 @@ export default function WerewolfApp() {
       speakerQueue: [],
       currentSpeaker: null,
       roleConfig: { '狼人': 2, '狼王': 1, '預言家': 1, '女巫': 1, '獵人': 1, '守衛': 1, '騎士': 1, '白癡': 1, '村民': 3, '雪狼': 0 },
+      advancedSettings: { knightCanDuelDuringVote: true }, // 新增進階設定
       players: [{ id: user.uid, name: playerName, role: '未知', isAlive: true, isIdiotRevealed: false, avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${user.uid}` }],
       chat: [],
       logs: [{ type: 'system', message: `房間 ${code} 建立成功`, time: Date.now() }],
@@ -464,6 +505,13 @@ export default function WerewolfApp() {
     const newCount = Math.max(0, currentCount + delta);
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), { [`roleConfig.${role}`]: newCount });
   };
+  
+  const toggleAdvancedSetting = async (settingKey) => {
+    if (room.hostId !== user.uid || room.status !== 'waiting') return;
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id), { 
+        [`advancedSettings.${settingKey}`]: !room.advancedSettings?.[settingKey] 
+    });
+  };
 
   const startGame = async () => {
     const totalRoles = Object.values(room.roleConfig).reduce((a, b) => a + b, 0);
@@ -497,7 +545,10 @@ export default function WerewolfApp() {
   const handlePlayerClick = async (targetId) => {
     const me = room.players.find(p => p.id === user.uid);
     const isHunterShooting = room.status === 'hunter_shoot' && me?.id === room.currentSpeaker;
-    const isKnightDuelling = room.status === 'day' && me?.role === '騎士' && !room.knightUsed;
+    
+    // 檢查騎士是否可以在當前階段決鬥
+    const canDuelNow = room.status === 'day' && (!room.advancedSettings?.knightCanDuelDuringVote ? room.subPhase !== 'discussing' : true);
+    const isKnightDuelling = canDuelNow && me?.role === '騎士' && !room.knightUsed;
     
     if (!me || (!me.isAlive && !isHunterShooting)) return;
 
@@ -520,6 +571,10 @@ export default function WerewolfApp() {
     } 
     else if (room.status === 'day' && room.subPhase === 'discussing' && !me.isIdiotRevealed) {
       await updateDoc(roomRef, { [`votes.${user.uid}`]: targetId });
+      // 讓騎士在投票階段點擊時，也能同時選取為決鬥目標 (如果設定允許)
+      if (isKnightDuelling && targetId !== 'skip') {
+        setSelectedTarget(targetId);
+      }
     }
     else if (isHunterShooting || isKnightDuelling) {
       setSelectedTarget(targetId);
@@ -681,7 +736,7 @@ export default function WerewolfApp() {
 
   if (!user) return <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white font-sans">載入中...</div>;
 
-  const isNight = room?.status === 'night';
+  const isNight = room?.status === 'night' || room?.status === 'idiot_reveal';
   const themeClasses = isNight ? "bg-slate-900 text-purple-200" : "bg-[#fdf6e3] text-[#3e2723]";
   const me = room?.players.find(p => p.id === user.uid);
   const isHost = room?.hostId === user.uid;
@@ -689,7 +744,10 @@ export default function WerewolfApp() {
   
   const isHunterShooting = room?.status === 'hunter_shoot' && me?.id === room?.currentSpeaker;
   const isVotingPhase = room?.status === 'day' && room?.subPhase === 'discussing' && me?.isAlive && !me?.isIdiotRevealed;
-  const canUseKnightSkill = me?.role === '騎士' && me?.isAlive && room?.status === 'day' && !room?.knightUsed;
+  
+  // 判斷騎士是否能在當前階段發動技能
+  const canDuelNow = room?.status === 'day' && (!room?.advancedSettings?.knightCanDuelDuringVote ? room?.subPhase !== 'discussing' : true);
+  const canUseKnightSkill = me?.role === '騎士' && me?.isAlive && canDuelNow && !room?.knightUsed;
 
   const myTurn = (room?.status === 'night' && room?.subPhase === 'guard' && me?.role === '守衛' && me?.isAlive) ||
                  (room?.status === 'night' && room?.subPhase === 'wolf' && WOLF_ROLES.includes(me?.role) && me?.isAlive) ||
@@ -736,6 +794,12 @@ export default function WerewolfApp() {
         .backface-hidden { backface-visibility: hidden; } 
         .rotate-y-180 { transform: rotateY(180deg); }
         @keyframes scaleIn { from { transform: scale(0.5); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        @keyframes bounceWobble { 
+          0%, 100% { transform: translateY(0) rotate(0deg); } 
+          25% { transform: translateY(-20px) rotate(-5deg); } 
+          50% { transform: translateY(0) rotate(5deg); } 
+          75% { transform: translateY(-10px) rotate(-2deg); } 
+        }
       `}</style>
 
       {/* 身分揭曉動畫 Modal */}
@@ -758,8 +822,31 @@ export default function WerewolfApp() {
         </div>
       )}
 
+      {/* 白癡翻牌動畫 Modal */}
+      {showIdiotReveal && idiotRevealData && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-green-900/90 backdrop-blur-sm transition-opacity">
+           <div className="bg-white p-8 rounded-3xl shadow-[0_0_80px_rgba(34,197,94,0.5)] border-8 border-green-500 text-center max-w-md w-[90%] transform transition-all animate-[scaleIn_0.5s_ease-out]">
+              <div className="flex justify-center mb-4 animate-[bounceWobble_1s_ease-in-out_infinite]">
+                 <Frown size={100} className="text-green-600" />
+              </div>
+              <h2 className="text-3xl font-black text-gray-800 mb-2">我是白癡！</h2>
+              <h3 className="text-xl font-bold text-green-700 mb-4">玩家：{idiotRevealData.name}</h3>
+              <p className="text-gray-600 mb-8 font-semibold leading-relaxed">
+                 被最高票放逐，觸發【白癡】被動技能！<br/>
+                 免除本次放逐死亡，但從此失去所有投票與被投票權利。
+              </p>
+              <button 
+                 onClick={finishIdiotReveal}
+                 className="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-4 px-6 rounded-full text-lg shadow-lg transition-all active:scale-95"
+              >
+                 {isHost ? '確認並進入黑夜' : '等待主持人確認...'}
+              </button>
+           </div>
+        </div>
+      )}
+
       {/* 勝利結算動畫 Overlay */}
-      {room.winner && (
+      {room.winner && !showIdiotReveal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm transition-opacity">
           <div className="text-center p-4">
             <h1 className={`animate-[bounce_2s_ease-in-out_infinite] text-5xl md:text-8xl font-black mb-8 drop-shadow-[0_0_20px_rgba(255,255,255,0.5)] ${room.winner === 'good' ? 'text-blue-400' : 'text-red-500'}`}>
@@ -787,6 +874,7 @@ export default function WerewolfApp() {
               狀態: {
                 room.status === 'waiting' ? '等待玩家...' :
                 room.status === 'night' ? `🌙 黑夜 (${PHASE_NAMES[room.subPhase] || '結算'}回合)` :
+                room.status === 'idiot_reveal' ? '🤪 白癡翻牌' :
                 room.subPhase === 'speaking' ? '🗣️ 輪流發言' : 
                 room.status === 'hunter_shoot' ? '🎯 技能發動中' : '⚖️ 自由討論/投票'
               }
@@ -807,11 +895,11 @@ export default function WerewolfApp() {
         {/* Left Column: Actions & Players */}
         <div className="space-y-6 md:col-span-1">
           
-          {/* 【優化】Waiting Phase: 雙排網格 Role Config (手機不亂跳) */}
+          {/* Waiting Phase: Role Config & Advanced Settings */}
           {room.status === 'waiting' && (
-            <div className="bg-white/50 rounded-xl p-4 shadow-lg border-2 border-amber-500">
-              <h3 className="font-bold mb-3 flex items-center text-[#3e2723]"><Shield size={18} className="mr-2"/> 職業設定 (目前: {room.players.length}人)</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div className="bg-white/50 rounded-xl p-4 shadow-lg border-2 border-amber-500 flex flex-col max-h-[60vh]">
+              <h3 className="font-bold mb-3 flex items-center text-[#3e2723] shrink-0"><Shield size={18} className="mr-2"/> 職業設定 (目前: {room.players.length}人)</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 overflow-y-auto pr-2 mb-4 shrink">
                 {AVAILABLE_ROLES.map(role => (
                   <div key={role} className="flex justify-between items-center bg-white/70 p-2 rounded-lg shadow-sm border border-gray-200">
                     <span className={`font-bold text-sm ${ROLES_INFO[role].color}`}>{role}</span>
@@ -822,6 +910,20 @@ export default function WerewolfApp() {
                     </div>
                   </div>
                 ))}
+              </div>
+              
+              <div className="shrink-0 border-t border-amber-300 pt-3 mt-auto">
+                 <h4 className="font-bold text-sm mb-2 flex items-center text-amber-800"><CheckSquare size={16} className="mr-1"/> 主持人進階設定</h4>
+                 <div className="flex items-center justify-between bg-white/60 p-2 rounded-lg border border-amber-200">
+                    <span className="text-sm font-semibold text-gray-700">騎士可於投票階段決鬥</span>
+                    <button 
+                      disabled={!isHost}
+                      onClick={() => toggleAdvancedSetting('knightCanDuelDuringVote')}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${room.advancedSettings?.knightCanDuelDuringVote ? 'bg-green-500' : 'bg-gray-300'} ${!isHost && 'opacity-50 cursor-not-allowed'}`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${room.advancedSettings?.knightCanDuelDuringVote ? 'translate-x-6' : 'translate-x-1'}`} />
+                    </button>
+                 </div>
               </div>
             </div>
           )}
@@ -844,7 +946,7 @@ export default function WerewolfApp() {
                 </div>
               </div>
 
-              {/* 騎士專屬發動技能區塊 (在白天任何時候都能發動) */}
+              {/* 騎士專屬發動技能區塊 (判斷是否開啟進階設定) */}
               {canUseKnightSkill && (
                 <div className={`p-4 rounded-xl shadow-lg border-2 mt-4 animate-[pulse_2s_ease-in-out_infinite] bg-amber-100 border-amber-500 text-amber-900`}>
                   <h4 className="font-bold text-center mb-2 flex items-center justify-center">
