@@ -12,27 +12,24 @@ import {
   Sword, Crown, Snowflake, Frown, CheckSquare
 } from 'lucide-react';
 
-// 👇👇👇 ⚠️ 嚴重警告：請務必將以下內容替換為你真實的 Firebase 金鑰！ ⚠️ 👇👇👇
-// 如果沒有替換成真實的字串，Vercel 網頁就會當機變成白畫面！
-const firebaseConfig = {
-  apiKey: "AIzaSyCi7lXBAESeCpXpxZho7wz5i6KMpY9XfmA",
+// 系統環境判斷：確保在預覽環境和你的 Vercel 都能正常運行
+const firebaseConfig = typeof __firebase_config !== 'undefined' && __firebase_config
+  ? JSON.parse(__firebase_config) 
+  : {
+      // 👇👇👇 ⚠️ 如果要在 Vercel 部署，請將這裡換成你真實的 Firebase 金鑰 ⚠️ 👇👇👇
+      apiKey: "AIzaSyCi7lXBAESeCpXpxZho7wz5i6KMpY9XfmA",
   authDomain: "hol-4e473.firebaseapp.com",
   projectId: "hol-4e473",
   storageBucket: "hol-4e473.firebasestorage.app",
   messagingSenderId: "665755863496",
   appId: "1:665755863496:web:7ad0698d2360fc577898fd"
-};
-// 👆👆👆 ⚠️ 嚴重警告：請務必將以上內容替換為你真實的 Firebase 金鑰！ ⚠️ 👆👆👆
+      // 👆👆👆 ⚠️ 如果要在 Vercel 部署，請將這裡換成你真實的 Firebase 金鑰 ⚠️ 👆👆👆
+    };
 
-// 系統環境判斷 (確保本地與預覽環境皆可運行)
-const finalConfig = typeof __firebase_config !== 'undefined' && __firebase_config 
-  ? JSON.parse(__firebase_config) 
-  : myFirebaseConfig;
-
-const app = initializeApp(finalConfig);
+const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'werewolf-web-app';
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'werewolf-web-app-final';
 
 // --- Helper Functions ---
 const generateRoomCode = () => Math.random().toString(36).substring(2, 6).toUpperCase();
