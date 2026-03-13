@@ -12,7 +12,8 @@ import {
   Sword, Crown, Snowflake, Frown, CheckSquare
 } from 'lucide-react';
 
-// 👇👇👇 ⚠️ 如果在本地 VS Code 執行，請將下面這段換成你自己的 Firebase 金鑰 ⚠️ 👇👇👇
+// 👇👇👇 ⚠️ 嚴重警告：請務必將以下內容替換為你真實的 Firebase 金鑰！ ⚠️ 👇👇👇
+// 如果沒有替換成真實的字串，Vercel 網頁就會當機變成白畫面！
 const firebaseConfig = {
   apiKey: "AIzaSyCi7lXBAESeCpXpxZho7wz5i6KMpY9XfmA",
   authDomain: "hol-4e473.firebaseapp.com",
@@ -21,9 +22,14 @@ const firebaseConfig = {
   messagingSenderId: "665755863496",
   appId: "1:665755863496:web:7ad0698d2360fc577898fd"
 };
-// 👆👆👆 ⚠️ 請將上面這段換成你自己的 Firebase 金鑰 ⚠️ 👆👆👆
+// 👆👆👆 ⚠️ 嚴重警告：請務必將以上內容替換為你真實的 Firebase 金鑰！ ⚠️ 👆👆👆
 
-const app = initializeApp(firebaseConfig);
+// 系統環境判斷 (確保本地與預覽環境皆可運行)
+const finalConfig = typeof __firebase_config !== 'undefined' && __firebase_config 
+  ? JSON.parse(__firebase_config) 
+  : myFirebaseConfig;
+
+const app = initializeApp(finalConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'werewolf-web-app';
@@ -77,6 +83,7 @@ export default function WerewolfApp() {
   const [room, setRoom] = useState(null);
   const [chatInput, setChatInput] = useState('');
   const [isCardFlipped, setIsCardFlipped] = useState(false);
+  const [initError, setInitError] = useState(null);
   
   const [showRoleModal, setShowRoleModal] = useState(false);
   const prevStatusRef = useRef(null);
@@ -85,7 +92,6 @@ export default function WerewolfApp() {
   const [selectedTarget, setSelectedTarget] = useState(null);
   const chatBottomRef = useRef(null);
 
-  // 用於控制白癡翻牌動畫的本地狀態
   const [showIdiotReveal, setShowIdiotReveal] = useState(false);
   const [idiotRevealData, setIdiotRevealData] = useState(null);
 
@@ -99,6 +105,7 @@ export default function WerewolfApp() {
         }
       } catch (error) {
         console.error("Auth error:", error);
+        setInitError(error.message);
       }
     };
     initAuth();
@@ -114,7 +121,6 @@ export default function WerewolfApp() {
         const data = snapshot.data();
         setRoom(data);
         
-        // 檢查是否需要顯示白癡翻牌動畫
         if (data.status === 'idiot_reveal' && !showIdiotReveal) {
           setIdiotRevealData(data.idiotRevealInfo);
           setShowIdiotReveal(true);
@@ -127,7 +133,6 @@ export default function WerewolfApp() {
     return () => unsubscribe();
   }, [user, room?.id, showIdiotReveal]);
 
-  // 獨立處理特定狀態清理，避免打字或投票時清空 selectedTarget
   useEffect(() => {
     if (room?.status === 'day') {
       setSeerResult(null);
@@ -356,7 +361,7 @@ export default function WerewolfApp() {
         
         if (exiledPlayer.role === '白癡' && !exiledPlayer.isIdiotRevealed) {
           updatedPlayers = updatedPlayers.map(p => p.id === exiledId ? { ...p, isIdiotRevealed: true } : p);
-          voteLog = `投票結束，最高票 ${exiledPlayer?.name}(${maxVotes}票)。`; // 後續會由動畫補充
+          voteLog = `投票結束，最高票 ${exiledPlayer?.name}(${maxVotes}票)。`; 
           triggerIdiotReveal = true;
           idiotPlayerInfo = { id: exiledPlayer.id, name: exiledPlayer.name };
           exiledId = null; 
@@ -385,13 +390,12 @@ export default function WerewolfApp() {
       votes: {}
     };
 
-    // 處理白癡翻牌動畫過渡狀態
     if (triggerIdiotReveal) {
         updates.status = 'idiot_reveal';
         updates.idiotRevealInfo = idiotPlayerInfo;
         updates.logs = arrayUnion(...newLogs, { type: 'sys', message: `系統：${idiotPlayerInfo.name} 翻牌為【白癡】，免除放逐並失去投票權！`, time: Date.now() + 1 });
         await updateDoc(roomRef, updates);
-        return; // 中斷後續結算，等待動畫結束
+        return; 
     }
 
     if (skillCanShoot) {
@@ -413,22 +417,17 @@ export default function WerewolfApp() {
     await updateDoc(roomRef, updates);
   };
 
-  // 結束白癡翻牌動畫並繼續遊戲
   const finishIdiotReveal = async () => {
       setShowIdiotReveal(false);
-      // 只有主持人負責推進狀態，避免多人同時點擊
       if (room.hostId !== user.uid) return;
       
       const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'werewolf_rooms', room.id);
-      
-      // 翻牌後直接進入黑夜
       let updates = {
           status: 'night',
           nightActions: { sharedWolfTarget: null, wolfTarget: null, seerChecked: false, witchHeal: false, witchPoison: null, guardTarget: null, lastGuardTarget: room.nightActions?.lastGuardTarget || null },
           subPhase: getNextNightPhase('start', room.players),
           logs: arrayUnion({ type: 'sys', message: '天黑請閉眼...', time: Date.now() })
       };
-      
       await updateDoc(roomRef, updates);
   };
 
@@ -467,7 +466,7 @@ export default function WerewolfApp() {
       speakerQueue: [],
       currentSpeaker: null,
       roleConfig: { '狼人': 2, '狼王': 1, '預言家': 1, '女巫': 1, '獵人': 1, '守衛': 1, '騎士': 1, '白癡': 1, '村民': 3, '雪狼': 0 },
-      advancedSettings: { knightCanDuelDuringVote: true }, // 新增進階設定
+      advancedSettings: { knightCanDuelDuringVote: true }, 
       players: [{ id: user.uid, name: playerName, role: '未知', isAlive: true, isIdiotRevealed: false, avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${user.uid}` }],
       chat: [],
       logs: [{ type: 'system', message: `房間 ${code} 建立成功`, time: Date.now() }],
@@ -546,7 +545,6 @@ export default function WerewolfApp() {
     const me = room.players.find(p => p.id === user.uid);
     const isHunterShooting = room.status === 'hunter_shoot' && me?.id === room.currentSpeaker;
     
-    // 檢查騎士是否可以在當前階段決鬥
     const canDuelNow = room.status === 'day' && (!room.advancedSettings?.knightCanDuelDuringVote ? room.subPhase !== 'discussing' : true);
     const isKnightDuelling = canDuelNow && me?.role === '騎士' && !room.knightUsed;
     
@@ -571,7 +569,6 @@ export default function WerewolfApp() {
     } 
     else if (room.status === 'day' && room.subPhase === 'discussing' && !me.isIdiotRevealed) {
       await updateDoc(roomRef, { [`votes.${user.uid}`]: targetId });
-      // 讓騎士在投票階段點擊時，也能同時選取為決鬥目標 (如果設定允許)
       if (isKnightDuelling && targetId !== 'skip') {
         setSelectedTarget(targetId);
       }
@@ -734,6 +731,18 @@ export default function WerewolfApp() {
     }
   };
 
+  // 若 Firebase 初始失敗顯示錯誤畫面
+  if (initError) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-gray-900 text-red-400 p-4 text-center">
+        <ShieldAlert size={64} className="mb-4" />
+        <h2 className="text-2xl font-bold mb-2">資料庫連線失敗</h2>
+        <p>請確認你已經在 <code>App.jsx</code> 中貼上了真實的 Firebase API Key！</p>
+        <p className="text-sm mt-4 opacity-70">錯誤詳情: {initError}</p>
+      </div>
+    );
+  }
+
   if (!user) return <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white font-sans">載入中...</div>;
 
   const isNight = room?.status === 'night' || room?.status === 'idiot_reveal';
@@ -745,7 +754,6 @@ export default function WerewolfApp() {
   const isHunterShooting = room?.status === 'hunter_shoot' && me?.id === room?.currentSpeaker;
   const isVotingPhase = room?.status === 'day' && room?.subPhase === 'discussing' && me?.isAlive && !me?.isIdiotRevealed;
   
-  // 判斷騎士是否能在當前階段發動技能
   const canDuelNow = room?.status === 'day' && (!room?.advancedSettings?.knightCanDuelDuringVote ? room?.subPhase !== 'discussing' : true);
   const canUseKnightSkill = me?.role === '騎士' && me?.isAlive && canDuelNow && !room?.knightUsed;
 
@@ -776,9 +784,22 @@ export default function WerewolfApp() {
             <div className="relative flex items-center py-2">
               <div className="flex-grow border-t border-gray-600"></div><span className="flex-shrink-0 mx-4 text-gray-500 text-sm">或</span><div className="flex-grow border-t border-gray-600"></div>
             </div>
-            <div className="flex space-x-2">
-              <input type="text" value={roomIdInput} onChange={(e) => setRoomIdInput(e.target.value)} className="flex-grow bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 uppercase" placeholder="輸入房間代碼" maxLength={4}/>
-              <button onClick={joinRoom} className="bg-gray-600 hover:bg-gray-500 text-white font-bold py-3 px-6 rounded-lg transition duration-200">加入</button>
+            {/* 【優化】完美解決手機版加入按鈕被擠壓的問題 */}
+            <div className="flex space-x-3">
+              <input 
+                type="text" 
+                value={roomIdInput} 
+                onChange={(e) => setRoomIdInput(e.target.value)} 
+                className="w-full flex-1 min-w-0 bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 uppercase" 
+                placeholder="輸入房間代碼" 
+                maxLength={4}
+              />
+              <button 
+                onClick={joinRoom} 
+                className="shrink-0 whitespace-nowrap bg-gray-600 hover:bg-gray-500 text-white font-bold py-3 px-6 rounded-lg transition duration-200"
+              >
+                加入
+              </button>
             </div>
           </div>
         </div>
